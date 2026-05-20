@@ -23,10 +23,15 @@ type Manifest = {
   runIdHash: string;
   callId: string;
   toolCallId: string;
+  keepContent?: boolean;
   expected: {
     spanNames: string[];
     metrics: Record<string, number>;
     spanTypes: Record<string, string>;
+    metadata: Record<string, Record<string, unknown>>;
+    runServiceName: string;
+    expectOutput: boolean;
+    expectInput: boolean;
   };
 };
 
@@ -188,6 +193,58 @@ function check(spans: Span[]): Check[] {
     });
   }
 
+  // 4a. Per-span metadata.openclaw.* fields.
+  for (const [spanName, fields] of Object.entries(
+    manifest.expected.metadata,
+  )) {
+    const s = byName.get(spanName);
+    const oc = ((s?.metadata ?? {}) as Record<string, unknown>)["openclaw"] as
+      | Record<string, unknown>
+      | undefined;
+    for (const [field, expectedVal] of Object.entries(fields)) {
+      const got = oc?.[field];
+      out.push({
+        name: `${spanName}.metadata.openclaw.${field}`,
+        pass: deepEqual(got, expectedVal),
+        detail: `expected ${JSON.stringify(expectedVal)}, got ${JSON.stringify(got)}`,
+      });
+    }
+  }
+
+  // 4b. service_name on the run span.
+  {
+    const runMeta = (run?.metadata ?? {}) as Record<string, unknown>;
+    out.push({
+      name: `openclaw.run.metadata.service_name`,
+      pass: runMeta["service_name"] === manifest.expected.runServiceName,
+      detail: `expected ${manifest.expected.runServiceName}, got ${JSON.stringify(runMeta["service_name"])}`,
+    });
+  }
+
+  // 4c. Output captured on model.usage (default capture.output=true).
+  if (manifest.expected.expectOutput) {
+    out.push({
+      name: `openclaw.model.usage has output`,
+      pass: usage?.output !== undefined && usage?.output !== null,
+      detail: `got ${truncate(JSON.stringify(usage?.output))}`,
+    });
+  }
+
+  // 4d. Input captured iff --keep-content.
+  if (manifest.expected.expectInput) {
+    out.push({
+      name: `openclaw.model.usage has input (--keep-content)`,
+      pass: usage?.input !== undefined && usage?.input !== null,
+      detail: `got ${truncate(JSON.stringify(usage?.input))}`,
+    });
+  } else {
+    out.push({
+      name: `openclaw.model.usage input is empty (default privacy)`,
+      pass: usage?.input === undefined || usage?.input === null,
+      detail: `got ${truncate(JSON.stringify(usage?.input))}`,
+    });
+  }
+
   // 5. Tag smoke-test present on at least one span.
   const taggedCount = spans.filter((s) => s.tags?.includes("smoke-test")).length;
   out.push({
@@ -246,6 +303,18 @@ async function main() {
     }`,
   );
   process.exit(failed > 0 ? 1 : 0);
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (typeof a === "number" && typeof b === "number")
+    return Math.abs(a - b) < 1e-6;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function truncate(s: string, n = 120): string {
+  return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
 main().catch((err) => {

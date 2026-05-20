@@ -206,8 +206,8 @@ async function main() {
     runIdHash,
     callId,
     toolCallId,
+    keepContent,
     expected: {
-      // What we expect verify.ts to find.
       spanNames: [
         "openclaw.run",
         "openclaw.model.call",
@@ -218,12 +218,50 @@ async function main() {
         prompt_tokens: 1024,
         completion_tokens: 256,
         tokens: 1280,
+        prompt_cached_tokens: 0,
         cost: 0.0123,
       },
       spanTypes: {
         "openclaw.model.usage": "llm",
         "openclaw.tool.execution": "tool",
       },
+      // Per-span metadata.openclaw.* fields we expect to see.
+      metadata: {
+        "openclaw.run": {
+          agent: "jeffery",
+          channel: "telegram",
+          provider: "anthropic",
+          model: "claude-sonnet-4-5",
+          trigger: "message",
+          session_kind: "telegram_direct",
+        },
+        "openclaw.model.call": {
+          provider: "anthropic",
+          model: "claude-sonnet-4-5",
+          api: "messages",
+          transport: "https",
+          context_token_budget: 200000,
+          upstream_request_id_hash: "abc12345",
+          duration_ms: 450,
+          request_bytes: 1234,
+          response_bytes: 5678,
+          ttfb_ms: 220,
+        },
+        "openclaw.model.usage": {
+          provider: "anthropic",
+          model: "claude-sonnet-4-5",
+        },
+        "openclaw.tool.execution": {
+          tool_name: "search",
+          duration_ms: 18,
+        },
+      },
+      // Service name lives at metadata.service_name on the run span.
+      runServiceName: serviceName,
+      // If --keep-content, we expect input + output captured. Output is
+      // captured by default; input requires the flag.
+      expectOutput: true,
+      expectInput: keepContent,
     },
     timestamp: new Date().toISOString(),
   };
