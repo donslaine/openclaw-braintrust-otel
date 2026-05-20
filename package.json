@@ -4,6 +4,9 @@
   "private": true,
   "description": "Internal OpenClaw exporter that emits Braintrust-shaped OTEL spans",
   "type": "module",
+  "scripts": {
+    "smoke": "tsx scripts/smoke.ts"
+  },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-proto": "0.218.0",
@@ -12,7 +15,8 @@
     "@opentelemetry/semantic-conventions": "1.41.1"
   },
   "devDependencies": {
-    "@openclaw/plugin-sdk": "workspace:*"
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
   },
   "openclaw": {
     "extensions": ["./index.ts"]
