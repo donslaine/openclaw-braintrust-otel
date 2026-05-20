@@ -19,7 +19,13 @@
 // children — "openclaw.model.call", "openclaw.model.usage" (type=llm,
 // with token + cost metrics), and "openclaw.tool.execution" (type=tool).
 
+import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createBraintrustOtelService } from "../src/service.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 type AnyEvent = { type: string; ts: number; seq: number; [k: string]: unknown };
 
@@ -185,11 +191,52 @@ async function main() {
 
   console.log("[smoke] flushing spans...");
   await service.stop();
+  const salt = process.env.BRAINTRUST_SESSION_HASH_SALT ?? "";
+  const runIdHash = createHash("sha256")
+    .update(salt)
+    .update(runId)
+    .digest("hex")
+    .slice(0, 16);
+
+  const manifest = {
+    parent: process.env.BRAINTRUST_PARENT,
+    serviceName,
+    tags: ["smoke-test"],
+    runId,
+    runIdHash,
+    callId,
+    toolCallId,
+    expected: {
+      // What we expect verify.ts to find.
+      spanNames: [
+        "openclaw.run",
+        "openclaw.model.call",
+        "openclaw.model.usage",
+        "openclaw.tool.execution",
+      ],
+      metrics: {
+        prompt_tokens: 1024,
+        completion_tokens: 256,
+        tokens: 1280,
+        cost: 0.0123,
+      },
+      spanTypes: {
+        "openclaw.model.usage": "llm",
+        "openclaw.tool.execution": "tool",
+      },
+    },
+    timestamp: new Date().toISOString(),
+  };
+  const manifestPath = resolve(HERE, "..", ".last-smoke.json");
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
   console.log("[smoke] done. Check Braintrust:");
   console.log(`  parent: ${process.env.BRAINTRUST_PARENT}`);
   console.log(`  service.name: ${serviceName}`);
   console.log(`  tags: ["smoke-test"]`);
   console.log(`  runId: ${runId}`);
+  console.log(`  manifest: ${manifestPath}`);
+  console.log(`\nRun: npm run verify`);
 }
 
 function sleep(ms: number) {

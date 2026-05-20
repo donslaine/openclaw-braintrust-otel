@@ -5,7 +5,8 @@
   "description": "Internal OpenClaw exporter that emits Braintrust-shaped OTEL spans",
   "type": "module",
   "scripts": {
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "verify": "tsx scripts/verify.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
