@@ -236,10 +236,9 @@ export function createBraintrustOtelService() {
                   "braintrust.metrics.completion_tokens": tokens.output ?? 0,
                   "braintrust.metrics.tokens": tokens.total ?? 0,
                   "braintrust.metrics.prompt_cached_tokens": tokens.cache ?? 0,
-                  // TODO: braintrust.metrics.cost is NOT in the documented
-                  // schema, but the spike confirmed it works empirically.
-                  // Verify once we see real spans land; otherwise move to
-                  // braintrust.metadata.cost_usd.
+                  // braintrust.metrics.cost is undocumented in the public
+                  // schema but verified end-to-end via scripts/verify.ts —
+                  // it lands in the metrics column on Braintrust llm spans.
                   "braintrust.metrics.cost":
                     (event["costUsd"] as number) ?? 0,
                   "braintrust.metadata.openclaw.provider":

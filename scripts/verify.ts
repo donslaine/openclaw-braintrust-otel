@@ -52,6 +52,29 @@ if (!apiKey) {
 const manifest: Manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
 const projectName = manifest.parent.replace(/^project_name:/, "");
 
+async function resolveProjectId(name: string): Promise<string> {
+  const url = `https://api.braintrust.dev/v1/project?project_name=${encodeURIComponent(name)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) {
+    throw new Error(
+      `GET /v1/project ${res.status}: ${await res.text()}\n` +
+        `(If 404: the project '${name}' doesn't exist yet — Braintrust may not ` +
+        `auto-create projects on first OTEL write. Create it manually in the UI.)`,
+    );
+  }
+  const body = (await res.json()) as { objects?: Array<{ id: string; name: string }> };
+  const match = body.objects?.find((p) => p.name === name);
+  if (!match) {
+    throw new Error(
+      `Project '${name}' not found. Existing: ` +
+        JSON.stringify(body.objects?.map((p) => p.name) ?? []),
+    );
+  }
+  return match.id;
+}
+
 async function btql(query: string): Promise<Span[]> {
   const res = await fetch("https://api.braintrust.dev/btql", {
     method: "POST",
@@ -68,12 +91,11 @@ async function btql(query: string): Promise<Span[]> {
   return Array.isArray(body) ? body : body.data ?? [];
 }
 
-async function fetchSpans(): Promise<Span[]> {
+async function fetchSpans(projectId: string): Promise<Span[]> {
   // Filter by our hashed run id to pin down this exact smoke run.
-  // Falls back to tag filter if metadata path lookup turns out to differ.
   const q = `
     select: *
-    | from: project_logs('${projectName}')
+    | from: project_logs('${projectId}')
     | filter: metadata.openclaw.run_id_hash = '${manifest.runIdHash}'
     | sort: created DESC
     | limit: 100
@@ -81,12 +103,12 @@ async function fetchSpans(): Promise<Span[]> {
   return btql(q);
 }
 
-async function fetchSpansWithRetry(): Promise<Span[]> {
+async function fetchSpansWithRetry(projectId: string): Promise<Span[]> {
   const deadline = Date.now() + 30_000;
   let lastErr: unknown;
   while (Date.now() < deadline) {
     try {
-      const spans = await fetchSpans();
+      const spans = await fetchSpans(projectId);
       if (spans.length >= manifest.expected.spanNames.length) return spans;
     } catch (err) {
       lastErr = err;
@@ -94,7 +116,7 @@ async function fetchSpansWithRetry(): Promise<Span[]> {
     await new Promise((r) => setTimeout(r, 3000));
   }
   if (lastErr) throw lastErr;
-  return fetchSpans();
+  return fetchSpans(projectId);
 }
 
 type Check = { name: string; pass: boolean; detail: string };
@@ -192,10 +214,11 @@ function check(spans: Span[]): Check[] {
 }
 
 async function main() {
-  console.log(
-    `[verify] querying Braintrust project '${projectName}' for runIdHash=${manifest.runIdHash}`,
-  );
-  const spans = await fetchSpansWithRetry();
+  console.log(`[verify] resolving project '${projectName}'...`);
+  const projectId = await resolveProjectId(projectName);
+  console.log(`[verify] project id: ${projectId}`);
+  console.log(`[verify] querying for runIdHash=${manifest.runIdHash}`);
+  const spans = await fetchSpansWithRetry(projectId);
   console.log(`[verify] fetched ${spans.length} span(s)\n`);
 
   if (spans.length === 0) {

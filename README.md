@@ -57,6 +57,5 @@ This plugin is not published. Install by pointing the OpenClaw host at this dire
 
 - Wire real types from `@openclaw/infra` (`DiagnosticEventPayload`) and `@openclaw/plugin-sdk` (`OpenClawPluginService`) once the plugin is brought into the workspace.
 - Read plugin config from `ctx.config.plugins?.["braintrust-otel"]` instead of treating `ctx.config` as the plugin's own config.
-- Verify `braintrust.metrics.cost` lands on the first real trace (undocumented).
 - ACP-aware spans pending an upstream `runtime`/`acp.*` field on diagnostic events.
 - Vitest coverage for span shape.
