@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "smoke": "tsx scripts/smoke.ts",
-    "verify": "tsx scripts/verify.ts"
+    "verify": "tsx scripts/verify.ts",
+    "inspect": "tsx scripts/inspect.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
