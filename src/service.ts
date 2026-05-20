@@ -1,7 +1,9 @@
-// Thin slice (stage 1): emit `openclaw.run` and `openclaw.model.usage` spans
-// to Braintrust. Tool spans, model.call spans, and ACP handling come later.
+// Stage 2: emit openclaw.run, openclaw.model.usage, openclaw.model.call,
+// and openclaw.tool.execution spans to Braintrust.
 //
-// See ../../../docs/braintrust-otel-plugin.md for the full design.
+// ACP-specific spans are NOT emitted: current OpenClaw diagnostic events
+// carry no runtime/ACP marker fields. ACP sessions show up as ordinary
+// runs. See docs/braintrust-otel-plugin.md "ACP gap" section.
 
 import {
   context as otelContext,
@@ -18,9 +20,13 @@ import {
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { createHash } from "node:crypto";
 
-// Types are intentionally loose for the spike — the real shapes live in
-// @openclaw/infra (DiagnosticEventPayload) and src/plugins/types.ts
-// (OpenClawPluginService). Wire those in once we move from spike to real run.
+// Loose local types. The real shapes live in @openclaw/infra
+// (DiagnosticEventPayload) and src/plugins/types.ts (OpenClawPluginService);
+// wire them in once we publish this plugin as a workspace member.
+//
+// Field names mirror the upstream payloads (extracted from
+// src/infra/diagnostic-events.ts) so we can switch to the real types
+// without a renaming pass.
 type DiagnosticEvent = { type: string; [k: string]: unknown };
 type ServiceCtx = {
   internalDiagnostics?: {
@@ -28,6 +34,9 @@ type ServiceCtx = {
       listener: (event: DiagnosticEvent, meta: { trusted: boolean }) => void,
     ) => () => void;
   };
+  // ctx.config is actually the whole OpenClawConfig upstream; for the
+  // thin slice we treat the relevant subset as BraintrustOtelConfig.
+  // Real wiring will read from ctx.config.plugins?.["braintrust-otel"].
   config?: BraintrustOtelConfig;
 };
 
@@ -64,6 +73,10 @@ export function createBraintrustOtelService() {
   let unsubscribe: (() => void) | undefined;
   // run id -> open root span
   const openRuns = new Map<string, Span>();
+  // callId -> open model.call span
+  const openModelCalls = new Map<string, Span>();
+  // toolCallId (or synthesized key) -> open tool.execution span
+  const openTools = new Map<string, { span: Span; toolName: string }>();
 
   return {
     id: "braintrust-otel",
@@ -248,7 +261,163 @@ export function createBraintrustOtelService() {
             span.end();
             return;
           }
-          // tool.execution.* and model.call.* — stage 2
+          case "model.call.started": {
+            const callId = event["callId"] as string | undefined;
+            if (!callId || openModelCalls.has(callId)) return;
+            const runId = event["runId"] as string | undefined;
+            const parent = runId ? openRuns.get(runId) : undefined;
+            const parentCtx = parent
+              ? trace.setSpan(otelContext.active(), parent)
+              : otelContext.active();
+            const span = tracer.startSpan(
+              "openclaw.model.call",
+              {
+                attributes: {
+                  "braintrust.metadata.openclaw.provider":
+                    (event["provider"] as string) ?? "",
+                  "braintrust.metadata.openclaw.model":
+                    (event["model"] as string) ?? "",
+                  "braintrust.metadata.openclaw.api":
+                    (event["api"] as string) ?? "",
+                  "braintrust.metadata.openclaw.transport":
+                    (event["transport"] as string) ?? "",
+                  "braintrust.metadata.openclaw.context_token_budget":
+                    (event["contextTokenBudget"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.upstream_request_id_hash":
+                    (event["upstreamRequestIdHash"] as string) ?? "",
+                  ...sessionAttrs(event),
+                },
+              },
+              parentCtx,
+            );
+            openModelCalls.set(callId, span);
+            return;
+          }
+          case "model.call.completed":
+          case "model.call.error": {
+            const callId = event["callId"] as string | undefined;
+            if (!callId) return;
+            const span = openModelCalls.get(callId);
+            if (!span) return;
+            span.setAttribute(
+              "braintrust.metadata.openclaw.duration_ms",
+              (event["durationMs"] as number) ?? 0,
+            );
+            if (event["requestPayloadBytes"] !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.request_bytes",
+                event["requestPayloadBytes"] as number,
+              );
+            if (event["responseStreamBytes"] !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.response_bytes",
+                event["responseStreamBytes"] as number,
+              );
+            if (event["timeToFirstByteMs"] !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.ttfb_ms",
+                event["timeToFirstByteMs"] as number,
+              );
+            if (event.type === "model.call.error") {
+              span.setAttribute(
+                "braintrust.metadata.openclaw.error_category",
+                (event["errorCategory"] as string) ?? "",
+              );
+              if (event["failureKind"] !== undefined)
+                span.setAttribute(
+                  "braintrust.metadata.openclaw.failure_kind",
+                  event["failureKind"] as string,
+                );
+              span.setStatus({
+                code: SpanStatusCode.ERROR,
+                message:
+                  (event["errorCategory"] as string) ?? "model.call.error",
+              });
+            }
+            span.end();
+            openModelCalls.delete(callId);
+            return;
+          }
+          case "tool.execution.started": {
+            // toolCallId is the natural join key; synthesize one if missing
+            // so completed/error/blocked still find the open span.
+            const toolName = (event["toolName"] as string) ?? "unknown";
+            const key =
+              (event["toolCallId"] as string | undefined) ??
+              `${event["runId"] ?? ""}:${toolName}:${event["ts"] ?? Date.now()}`;
+            if (openTools.has(key)) return;
+            const runId = event["runId"] as string | undefined;
+            const parent = runId ? openRuns.get(runId) : undefined;
+            const parentCtx = parent
+              ? trace.setSpan(otelContext.active(), parent)
+              : otelContext.active();
+            const attrs: Record<string, string | number> = {
+              "braintrust.span_attributes.type": "tool",
+              "braintrust.metadata.openclaw.tool_name": toolName,
+              ...sessionAttrs(event),
+            };
+            const span = tracer.startSpan(
+              `openclaw.tool.execution`,
+              { attributes: attrs },
+              parentCtx,
+            );
+            span.setAttribute("braintrust.metadata.openclaw.tool_name", toolName);
+            // Optional tool input capture (off by default).
+            if (capture.toolInputs && event["paramsSummary"] !== undefined) {
+              setBraintrustContent(span, "input", event["paramsSummary"]);
+            }
+            openTools.set(key, { span, toolName });
+            return;
+          }
+          case "tool.execution.completed":
+          case "tool.execution.error":
+          case "tool.execution.blocked": {
+            const key =
+              (event["toolCallId"] as string | undefined) ??
+              // Fall back to a best-effort match (last open tool on this run).
+              [...openTools.keys()].find((k) =>
+                k.startsWith(`${event["runId"] ?? ""}:`),
+              );
+            if (!key) return;
+            const entry = openTools.get(key);
+            if (!entry) return;
+            const { span } = entry;
+            if (event["durationMs"] !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.duration_ms",
+                event["durationMs"] as number,
+              );
+            if (event.type === "tool.execution.error") {
+              span.setAttribute(
+                "braintrust.metadata.openclaw.error_category",
+                (event["errorCategory"] as string) ?? "",
+              );
+              if (event["errorCode"] !== undefined)
+                span.setAttribute(
+                  "braintrust.metadata.openclaw.error_code",
+                  event["errorCode"] as string,
+                );
+              span.setStatus({
+                code: SpanStatusCode.ERROR,
+                message:
+                  (event["errorCategory"] as string) ?? "tool.execution.error",
+              });
+            } else if (event.type === "tool.execution.blocked") {
+              span.setAttribute(
+                "braintrust.metadata.openclaw.blocked_reason",
+                (event["reason"] as string) ??
+                  (event["deniedReason"] as string) ??
+                  "blocked",
+              );
+              span.setStatus({
+                code: SpanStatusCode.ERROR,
+                message: "tool.execution.blocked",
+              });
+            }
+            span.end();
+            openTools.delete(key);
+            return;
+          }
           default:
             return;
         }
@@ -260,11 +429,17 @@ export function createBraintrustOtelService() {
         unsubscribe?.();
       } catch {}
       for (const span of openRuns.values()) {
-        try {
-          span.end();
-        } catch {}
+        try { span.end(); } catch {}
       }
       openRuns.clear();
+      for (const span of openModelCalls.values()) {
+        try { span.end(); } catch {}
+      }
+      openModelCalls.clear();
+      for (const { span } of openTools.values()) {
+        try { span.end(); } catch {}
+      }
+      openTools.clear();
       await provider?.shutdown();
       provider = undefined;
     },

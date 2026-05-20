@@ -5,8 +5,10 @@ Braintrust-shaped OTEL spans to `api.braintrust.dev/otel/v1/traces`.
 
 See [`docs/braintrust-otel-plugin.md`](../../docs/braintrust-otel-plugin.md) for design.
 
-**Status:** stage 1 thin slice — emits `openclaw.run` and `openclaw.model.usage`
-spans only. Tool spans, model.call spans, and ACP handling are TODO.
+**Status:** stage 2 — emits `openclaw.run`, `openclaw.model.usage`,
+`openclaw.model.call`, and `openclaw.tool.execution` spans.
+ACP-specific spans are deferred (current diagnostic events carry no ACP
+marker; see the design doc's "ACP gap" section).
 
 ## Required env
 
@@ -30,10 +32,10 @@ spans only. Tool spans, model.call spans, and ACP handling are TODO.
 
 This plugin is not published. Install by pointing the OpenClaw host at this directory.
 
-## TODO before stage 2
+## TODO
 
-- Wire real types from `@openclaw/infra` (`DiagnosticEventPayload`) and `@openclaw/plugin-sdk` (`OpenClawPluginService`)
-- Verify the parent-span context plumbing (current `globalThis.opentelemetryActiveContext` hack needs to use the proper OTEL `context` API)
-- Add `openclaw.model.call` and `openclaw.tool.execution` spans
-- ACP coarse spans + `runtime=acp` tagging
-- Vitest coverage for span shape
+- Wire real types from `@openclaw/infra` (`DiagnosticEventPayload`) and `@openclaw/plugin-sdk` (`OpenClawPluginService`) once the plugin is brought into the workspace.
+- Read plugin config from `ctx.config.plugins?.["braintrust-otel"]` instead of treating `ctx.config` as the plugin's own config.
+- Verify `braintrust.metrics.cost` lands on the first real trace (undocumented).
+- ACP-aware spans pending an upstream `runtime`/`acp.*` field on diagnostic events.
+- Vitest coverage for span shape.
