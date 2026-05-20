@@ -120,7 +120,9 @@ export function createBraintrustOtelService() {
         }),
         spanProcessors: [new BatchSpanProcessor(exporter)],
       });
-      provider.register();
+      // sdk-trace-base v2 removed .register(); set the global provider so
+      // trace.getTracer() resolves to our exporter-backed provider.
+      trace.setGlobalTracerProvider(provider);
       const tracer = trace.getTracer("braintrust-otel");
 
       const hashId = (v: unknown): string | undefined => {
