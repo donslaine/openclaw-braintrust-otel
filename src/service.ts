@@ -3,7 +3,12 @@
 //
 // See ../../../docs/braintrust-otel-plugin.md for the full design.
 
-import { trace, SpanStatusCode, type Span } from "@opentelemetry/api";
+import {
+  context as otelContext,
+  trace,
+  SpanStatusCode,
+  type Span,
+} from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
@@ -154,7 +159,8 @@ export function createBraintrustOtelService() {
             if (!runId || openRuns.has(runId)) return;
             const span = tracer.startSpan("openclaw.run", {
               attributes: {
-                "braintrust.tags": JSON.stringify(cfg.tags ?? []),
+                // Braintrust accepts string arrays directly (per docs).
+                "braintrust.tags": cfg.tags ?? [],
                 "braintrust.metadata.service_name": serviceName,
                 "braintrust.metadata.openclaw.agent":
                   (event["agent"] as string) ?? "",
@@ -195,48 +201,49 @@ export function createBraintrustOtelService() {
             const runId = event["runId"] as string | undefined;
             const parentSpan = runId ? openRuns.get(runId) : undefined;
             const tokens = (event["tokens"] ?? {}) as Record<string, number>;
-            const ctx = parentSpan
-              ? trace.setSpan(
-                  // @ts-expect-error: minimal API surface for spike
-                  globalThis.opentelemetryActiveContext ?? undefined,
-                  parentSpan,
-                )
-              : undefined;
+            // Nest under the run span using the real OTEL context API
+            // (W3C trace context). Braintrust uses standard parent linkage.
+            const parentCtx = parentSpan
+              ? trace.setSpan(otelContext.active(), parentSpan)
+              : otelContext.active();
             const span = tracer.startSpan(
               "openclaw.model.usage",
               {
                 attributes: {
                   "braintrust.span_attributes.type": "llm",
+                  // Braintrust-auto-mapped token metrics.
+                  // Source -> braintrust mapping:
+                  //   tokens.input  -> prompt_tokens
+                  //   tokens.output -> completion_tokens
+                  //   tokens.total  -> tokens (total)
+                  //   tokens.cache  -> prompt_cached_tokens
+                  "braintrust.metrics.prompt_tokens": tokens.input ?? 0,
+                  "braintrust.metrics.completion_tokens": tokens.output ?? 0,
+                  "braintrust.metrics.tokens": tokens.total ?? 0,
+                  "braintrust.metrics.prompt_cached_tokens": tokens.cache ?? 0,
+                  // TODO: braintrust.metrics.cost is NOT in the documented
+                  // schema, but the spike confirmed it works empirically.
+                  // Verify once we see real spans land; otherwise move to
+                  // braintrust.metadata.cost_usd.
                   "braintrust.metrics.cost":
                     (event["costUsd"] as number) ?? 0,
                   "braintrust.metadata.openclaw.provider":
                     (event["provider"] as string) ?? "",
                   "braintrust.metadata.openclaw.model":
                     (event["model"] as string) ?? "",
-                  "braintrust.metadata.openclaw.tokens.input":
-                    tokens.input ?? 0,
-                  "braintrust.metadata.openclaw.tokens.output":
-                    tokens.output ?? 0,
-                  "braintrust.metadata.openclaw.tokens.cache":
-                    tokens.cache ?? 0,
-                  "braintrust.metadata.openclaw.tokens.total":
-                    tokens.total ?? 0,
                   ...sessionAttrs(event),
                 },
               },
-              ctx,
+              parentCtx,
             );
+            // For non-string content (e.g. OpenAI-style message arrays),
+            // Braintrust expects the *_json variants with a JSON-stringified
+            // payload. Plain strings can use the bare braintrust.input/output.
             if (capture.input && event["input"] !== undefined) {
-              span.setAttribute(
-                "braintrust.input",
-                safeStringify(event["input"]),
-              );
+              setBraintrustContent(span, "input", event["input"]);
             }
             if (capture.output && event["output"] !== undefined) {
-              span.setAttribute(
-                "braintrust.output",
-                safeStringify(event["output"]),
-              );
+              setBraintrustContent(span, "output", event["output"]);
             }
             span.end();
             return;
@@ -269,5 +276,20 @@ function safeStringify(v: unknown): string {
     return typeof v === "string" ? v : JSON.stringify(v);
   } catch {
     return String(v);
+  }
+}
+
+// Per Braintrust docs: braintrust.input / braintrust.output take a string;
+// for arrays/objects (e.g. OpenAI message arrays) use the *_json variants
+// with a JSON-stringified payload.
+function setBraintrustContent(
+  span: Span,
+  kind: "input" | "output",
+  value: unknown,
+): void {
+  if (typeof value === "string") {
+    span.setAttribute(`braintrust.${kind}`, value);
+  } else {
+    span.setAttribute(`braintrust.${kind}_json`, safeStringify(value));
   }
 }
