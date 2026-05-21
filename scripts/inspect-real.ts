@@ -10,7 +10,9 @@
 //
 // Flags:
 //   --project <name>     project_name (required)
-//   --tag <tag>          tag to filter on (default: agent-jeffery)
+//   --tag <tag>          tag to filter on (default: none — fetch all spans)
+//   --service <name>     filter by resource service.name
+//   --span-name <name>   filter by span name (e.g. openclaw.model.usage)
 //   --since <minutes>    time window in minutes (default: 60)
 //   --limit <n>          max spans to fetch (default: 50)
 //   --raw                dump full JSON instead of formatted view
@@ -36,7 +38,9 @@ if (!projectName) {
   console.error("--project <name> is required");
   process.exit(1);
 }
-const tag = flag("tag") ?? "agent-jeffery";
+const tag = flag("tag"); // no default — empty means "all spans"
+const service = flag("service");
+const spanName = flag("span-name");
 const sinceMinutes = Number(flag("since") ?? "60");
 const limit = Number(flag("limit") ?? "50");
 const raw = has("raw");
@@ -128,16 +132,19 @@ async function main() {
   console.log(`[inspect-real] resolving project '${projectName}'...`);
   const projectId = await resolveProjectId(projectName);
   console.log(`[inspect-real] project id: ${projectId}`);
-  console.log(
-    `[inspect-real] querying spans tagged '${tag}' from the last ${sinceMinutes} minutes...`,
-  );
+  const filters: string[] = [
+    `created > now() - interval ${sinceMinutes} minute`,
+  ];
+  if (tag) filters.push(`tags INCLUDES '${tag}'`);
+  if (service) filters.push(`metadata.service_name = '${service}'`);
+  if (spanName) filters.push(`span_attributes.name = '${spanName}'`);
+  const filterExpr = filters.join(" AND ");
+  console.log(`[inspect-real] filter: ${filterExpr}`);
 
-  // BTQL: filter by tag + recency. We sort by created DESC to get the
-  // freshest first. Note: BTQL syntax for tag membership is "INCLUDES".
   const q = `
     select: *
     | from: project_logs('${projectId}')
-    | filter: tags INCLUDES '${tag}' AND created > now() - interval ${sinceMinutes} minute
+    | filter: ${filterExpr}
     | sort: created DESC
     | limit: ${limit}
   `;
@@ -147,11 +154,11 @@ async function main() {
 
   if (spans.length === 0) {
     console.error(
-      "[inspect-real] no spans match. Possible causes:\n" +
-        `  - tag '${tag}' not actually on emitted spans (check config)\n` +
-        `  - window too narrow (try --since 1440 for last day)\n` +
-        `  - wrong project (you asked for '${projectName}')\n` +
-        `  - spans never actually emitted (check gateway logs for heartbeat eventCount)`,
+      "[inspect-real] no spans match. Try widening filters:\n" +
+        `  - remove --tag to see ALL spans in the project\n` +
+        `  - --since 1440 for last 24h\n` +
+        `  - confirm project '${projectName}' is correct\n` +
+        `  - check gateway logs for heartbeat eventCount > 0`,
     );
     process.exit(1);
   }
