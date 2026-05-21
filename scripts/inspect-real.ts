@@ -17,6 +17,7 @@
 //   --limit <n>          max spans to fetch (default: 50)
 //   --raw                dump full JSON instead of formatted view
 //   --tree               group spans into trace trees
+//   --summary            print counts by span name + one sample per name
 
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -45,6 +46,7 @@ const sinceMinutes = Number(flag("since") ?? "60");
 const limit = Number(flag("limit") ?? "50");
 const raw = has("raw");
 const tree = has("tree");
+const summary = has("summary");
 
 type Span = {
   id: string;
@@ -165,6 +167,38 @@ async function main() {
 
   if (raw) {
     console.log(JSON.stringify(spans, null, 2));
+    return;
+  }
+
+  if (summary) {
+    // Count by span name + type, then print one full sample per span name.
+    const countsByName = new Map<string, number>();
+    const countsByType = new Map<string, number>();
+    const firstByName = new Map<string, Span>();
+    for (const s of spans) {
+      const name = String(s.span_attributes?.name ?? "(unnamed)");
+      const type = String(s.span_attributes?.type ?? "(none)");
+      countsByName.set(name, (countsByName.get(name) ?? 0) + 1);
+      countsByType.set(type, (countsByType.get(type) ?? 0) + 1);
+      if (!firstByName.has(name)) firstByName.set(name, s);
+    }
+
+    console.log("--- Counts by span name ---");
+    for (const [name, n] of [...countsByName.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${n.toString().padStart(5)}  ${name}`);
+    }
+    console.log("\n--- Counts by span_attributes.type ---");
+    for (const [type, n] of [...countsByType.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${n.toString().padStart(5)}  ${type}`);
+    }
+
+    console.log("\n--- One sample per span name ---");
+    for (const [name, s] of firstByName) {
+      console.log("=".repeat(72));
+      console.log(`SAMPLE: ${name}`);
+      printSpan(s);
+    }
+    console.log("=".repeat(72));
     return;
   }
 
