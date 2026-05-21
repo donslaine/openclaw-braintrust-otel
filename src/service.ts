@@ -177,9 +177,12 @@ export function createBraintrustOtelService() {
       // Subscribe directly via the SDK runtime — bypasses the trust gate
       // that withholds ctx.internalDiagnostics from non-allowlisted plugins.
       let eventCount = 0;
+      const eventCountByType = new Map<string, number>();
       unsubscribe = onInternalDiagnosticEvent((event, meta) => {
         if (!meta.trusted) return;
         eventCount++;
+        const t = (event as DiagnosticEvent).type ?? "(no-type)";
+        eventCountByType.set(t, (eventCountByType.get(t) ?? 0) + 1);
         try {
           handle(event as DiagnosticEvent);
         } catch (err) {
@@ -203,13 +206,18 @@ export function createBraintrustOtelService() {
       );
 
       // Periodic heartbeat so we can see whether events are actually
-      // arriving once real traffic flows.
+      // arriving once real traffic flows. Includes per-type counts so we
+      // can see which event types we receive (incl. ones our switch
+      // statement currently drops).
       const heartbeat = setInterval(() => {
+        const byType: Record<string, number> = {};
+        for (const [k, v] of eventCountByType) byType[k] = v;
         console.log(
           JSON.stringify({
             tag: "braintrust-otel",
             msg: "heartbeat",
             eventCount,
+            byType,
             openRuns: openRuns.size,
             openModelCalls: openModelCalls.size,
             openTools: openTools.size,
