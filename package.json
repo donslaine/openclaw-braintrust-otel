@@ -7,7 +7,8 @@
   "scripts": {
     "smoke": "tsx scripts/smoke.ts",
     "verify": "tsx scripts/verify.ts",
-    "inspect": "tsx scripts/inspect.ts"
+    "inspect": "tsx scripts/inspect.ts",
+    "inspect:real": "tsx scripts/inspect-real.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
