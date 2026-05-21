@@ -151,6 +151,17 @@ export function createBraintrustOtelService() {
           .slice(0, 16);
       };
 
+      // Attributes that should appear on EVERY span we emit, so any span
+      // is filterable by tag / service_name in BTQL (Braintrust auto-maps
+      // braintrust.tags and braintrust.metadata.* to its own columns, but
+      // those only land on spans that explicitly set them — there is no
+      // inheritance from parent spans).
+      const commonAttrs = (e: DiagnosticEvent): Record<string, string | number | string[]> => ({
+        "braintrust.tags": cfg.tags ?? [],
+        "braintrust.metadata.service_name": serviceName,
+        ...sessionAttrs(e),
+      });
+
       const sessionAttrs = (e: DiagnosticEvent) => {
         const out: Record<string, string> = {};
         const sessionKey = e["sessionKey"] as string | undefined;
@@ -244,9 +255,7 @@ export function createBraintrustOtelService() {
             // `agent` and `sessionKind` are NOT on the base — omit unless
             // they appear (e.g. harness.run.started may extend differently).
             const attrs: Record<string, string | number | string[]> = {
-              "braintrust.tags": cfg.tags ?? [],
-              "braintrust.metadata.service_name": serviceName,
-              ...sessionAttrs(event),
+              ...commonAttrs(event),
             };
             for (const k of [
               "channel",
@@ -305,6 +314,7 @@ export function createBraintrustOtelService() {
               "openclaw.model.usage",
               {
                 attributes: {
+                  ...commonAttrs(event),
                   "braintrust.span_attributes.type": "llm",
                   // Braintrust-auto-mapped token metrics.
                   // Source -> braintrust mapping:
@@ -359,6 +369,7 @@ export function createBraintrustOtelService() {
               "openclaw.model.call",
               {
                 attributes: {
+                  ...commonAttrs(event),
                   "braintrust.metadata.openclaw.provider":
                     (event["provider"] as string) ?? "",
                   "braintrust.metadata.openclaw.model":
@@ -371,7 +382,6 @@ export function createBraintrustOtelService() {
                     (event["contextTokenBudget"] as number) ?? 0,
                   "braintrust.metadata.openclaw.upstream_request_id_hash":
                     (event["upstreamRequestIdHash"] as string) ?? "",
-                  ...sessionAttrs(event),
                 },
               },
               parentCtx,
@@ -437,10 +447,10 @@ export function createBraintrustOtelService() {
             const parentCtx = parent
               ? trace.setSpan(otelContext.active(), parent)
               : otelContext.active();
-            const attrs: Record<string, string | number> = {
+            const attrs: Record<string, string | number | string[]> = {
+              ...commonAttrs(event),
               "braintrust.span_attributes.type": "tool",
               "braintrust.metadata.openclaw.tool_name": toolName,
-              ...sessionAttrs(event),
             };
             const span = tracer.startSpan(
               `openclaw.tool.execution`,
