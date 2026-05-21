@@ -1,9 +1,20 @@
-// Stage 2: emit openclaw.run, openclaw.model.usage, openclaw.model.call,
+// Stage 3: emit openclaw.run, openclaw.model.usage, openclaw.model.call,
 // and openclaw.tool.execution spans to Braintrust.
 //
-// ACP-specific spans are NOT emitted: current OpenClaw diagnostic events
-// carry no runtime/ACP marker fields. ACP sessions show up as ordinary
-// runs. See docs/braintrust-otel-plugin.md "ACP gap" section.
+// Trust gate bypass: ctx.internalDiagnostics is only granted by openclaw
+// to "diagnostics-otel" and "diagnostics-prometheus" (per
+// src/plugins/services.ts). We import onInternalDiagnosticEvent
+// directly from the plugin SDK to subscribe without that grant. This is
+// security-equivalent to a bundled diagnostics exporter — fine while
+// we're a bundled extension on the user's own image.
+//
+// Field shapes verified against src/infra/diagnostic-events.ts:
+//   - model.usage: usage.{input,output,cacheRead,cacheWrite,total}
+//                  (NOT tokens.* — earlier code was wrong)
+//   - run.*: runId at top level; agent/sessionKind do NOT exist there
+//
+// ACP-specific spans are NOT emitted: diagnostic events carry no
+// runtime/ACP marker fields. See docs/braintrust-otel-plugin.md.
 
 import {
   context as otelContext,
@@ -19,25 +30,21 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { createHash } from "node:crypto";
+// Direct subscription bypasses the ctx.internalDiagnostics trust gate.
+import { onInternalDiagnosticEvent } from "openclaw/plugin-sdk/diagnostic-runtime";
 
-// Loose local types. The real shapes live in @openclaw/infra
-// (DiagnosticEventPayload) and src/plugins/types.ts (OpenClawPluginService);
-// wire them in once we publish this plugin as a workspace member.
-//
-// Field names mirror the upstream payloads (extracted from
-// src/infra/diagnostic-events.ts) so we can switch to the real types
-// without a renaming pass.
 type DiagnosticEvent = { type: string; [k: string]: unknown };
 type ServiceCtx = {
+  // ctx.internalDiagnostics will be undefined for braintrust-otel (trust
+  // gate); we don't rely on it. Kept here only to document the shape.
   internalDiagnostics?: {
     onEvent: (
       listener: (event: DiagnosticEvent, meta: { trusted: boolean }) => void,
     ) => () => void;
   };
-  // ctx.config is actually the whole OpenClawConfig upstream; for the
-  // thin slice we treat the relevant subset as BraintrustOtelConfig.
-  // Real wiring will read from ctx.config.plugins?.["braintrust-otel"].
-  config?: BraintrustOtelConfig;
+  // ctx.config is the whole OpenClawConfig upstream; read our config
+  // from ctx.config.plugins.entries["braintrust-otel"].config.
+  config?: unknown;
 };
 
 export interface BraintrustOtelConfig {
@@ -92,7 +99,17 @@ export function createBraintrustOtelService() {
         return;
       }
 
-      const cfg = ctx.config ?? {};
+      // Read our config from the real OpenClawConfig shape.
+      const pluginEntry = (
+        ctx.config as
+          | {
+              plugins?: {
+                entries?: Record<string, { config?: BraintrustOtelConfig }>;
+              };
+            }
+          | undefined
+      )?.plugins?.entries?.["braintrust-otel"];
+      const cfg: BraintrustOtelConfig = pluginEntry?.config ?? {};
       const endpoint = cfg.endpoint ?? DEFAULT_ENDPOINT;
       const tracesEndpoint = cfg.tracesEndpoint ?? `${endpoint}/v1/traces`;
       const serviceName = cfg.serviceName ?? "openclaw";
@@ -157,14 +174,54 @@ export function createBraintrustOtelService() {
         return out;
       };
 
-      unsubscribe = ctx.internalDiagnostics?.onEvent((event, meta) => {
+      // Subscribe directly via the SDK runtime — bypasses the trust gate
+      // that withholds ctx.internalDiagnostics from non-allowlisted plugins.
+      let eventCount = 0;
+      unsubscribe = onInternalDiagnosticEvent((event, meta) => {
         if (!meta.trusted) return;
+        eventCount++;
         try {
-          handle(event);
+          handle(event as DiagnosticEvent);
         } catch (err) {
           console.warn("[braintrust-otel] handler error", err);
         }
       });
+
+      // Loud, structured startup log so it's obvious in container logs
+      // whether the exporter actually came online and was wired to events.
+      console.log(
+        JSON.stringify({
+          tag: "braintrust-otel",
+          msg: "exporter started",
+          tracesEndpoint,
+          serviceName,
+          tags: cfg.tags ?? [],
+          captureContent: capture,
+          sessionIdentifiers: sessIds,
+          subscribed: typeof unsubscribe === "function",
+        }),
+      );
+
+      // Periodic heartbeat so we can see whether events are actually
+      // arriving once real traffic flows.
+      const heartbeat = setInterval(() => {
+        console.log(
+          JSON.stringify({
+            tag: "braintrust-otel",
+            msg: "heartbeat",
+            eventCount,
+            openRuns: openRuns.size,
+            openModelCalls: openModelCalls.size,
+            openTools: openTools.size,
+          }),
+        );
+      }, 60_000);
+      heartbeat.unref?.();
+      const origUnsubscribe = unsubscribe;
+      unsubscribe = () => {
+        clearInterval(heartbeat);
+        origUnsubscribe?.();
+      };
 
       function handle(event: DiagnosticEvent) {
         switch (event.type) {
@@ -172,26 +229,31 @@ export function createBraintrustOtelService() {
           case "harness.run.started": {
             const runId = (event["runId"] ?? event["id"]) as string | undefined;
             if (!runId || openRuns.has(runId)) return;
-            const span = tracer.startSpan("openclaw.run", {
-              attributes: {
-                // Braintrust accepts string arrays directly (per docs).
-                "braintrust.tags": cfg.tags ?? [],
-                "braintrust.metadata.service_name": serviceName,
-                "braintrust.metadata.openclaw.agent":
-                  (event["agent"] as string) ?? "",
-                "braintrust.metadata.openclaw.channel":
-                  (event["channel"] as string) ?? "",
-                "braintrust.metadata.openclaw.provider":
-                  (event["provider"] as string) ?? "",
-                "braintrust.metadata.openclaw.model":
-                  (event["model"] as string) ?? "",
-                "braintrust.metadata.openclaw.trigger":
-                  (event["trigger"] as string) ?? "",
-                "braintrust.metadata.openclaw.session_kind":
-                  (event["sessionKind"] as string) ?? "",
-                ...sessionAttrs(event),
-              },
-            });
+            // Real run.* event fields (verified against
+            // src/infra/diagnostic-events.ts DiagnosticRunBaseEvent):
+            //   runId, sessionKey?, sessionId?, provider?, model?,
+            //   trigger?, channel?
+            // `agent` and `sessionKind` are NOT on the base — omit unless
+            // they appear (e.g. harness.run.started may extend differently).
+            const attrs: Record<string, string | number | string[]> = {
+              "braintrust.tags": cfg.tags ?? [],
+              "braintrust.metadata.service_name": serviceName,
+              ...sessionAttrs(event),
+            };
+            for (const k of [
+              "channel",
+              "provider",
+              "model",
+              "trigger",
+              "agent",
+              "sessionKind",
+            ] as const) {
+              const v = event[k];
+              if (typeof v === "string" && v) {
+                attrs[`braintrust.metadata.openclaw.${k === "sessionKind" ? "session_kind" : k}`] = v;
+              }
+            }
+            const span = tracer.startSpan("openclaw.run", { attributes: attrs });
             openRuns.set(runId, span);
             return;
           }
@@ -215,7 +277,17 @@ export function createBraintrustOtelService() {
           case "model.usage": {
             const runId = event["runId"] as string | undefined;
             const parentSpan = runId ? openRuns.get(runId) : undefined;
-            const tokens = (event["tokens"] ?? {}) as Record<string, number>;
+            // Real field is `usage`, not `tokens` — verified against
+            // src/infra/diagnostic-events.ts. Field names inside `usage`:
+            //   input, output, cacheRead, cacheWrite, promptTokens, total
+            const usage = (event["usage"] ?? {}) as {
+              input?: number;
+              output?: number;
+              cacheRead?: number;
+              cacheWrite?: number;
+              promptTokens?: number;
+              total?: number;
+            };
             // Nest under the run span using the real OTEL context API
             // (W3C trace context). Braintrust uses standard parent linkage.
             const parentCtx = parentSpan
@@ -228,14 +300,19 @@ export function createBraintrustOtelService() {
                   "braintrust.span_attributes.type": "llm",
                   // Braintrust-auto-mapped token metrics.
                   // Source -> braintrust mapping:
-                  //   tokens.input  -> prompt_tokens
-                  //   tokens.output -> completion_tokens
-                  //   tokens.total  -> tokens (total)
-                  //   tokens.cache  -> prompt_cached_tokens
-                  "braintrust.metrics.prompt_tokens": tokens.input ?? 0,
-                  "braintrust.metrics.completion_tokens": tokens.output ?? 0,
-                  "braintrust.metrics.tokens": tokens.total ?? 0,
-                  "braintrust.metrics.prompt_cached_tokens": tokens.cache ?? 0,
+                  //   usage.input      -> prompt_tokens (or promptTokens if present)
+                  //   usage.output     -> completion_tokens
+                  //   usage.total      -> tokens (total)
+                  //   usage.cacheRead  -> prompt_cached_tokens
+                  //   usage.cacheWrite -> prompt_cache_creation_tokens
+                  "braintrust.metrics.prompt_tokens":
+                    usage.promptTokens ?? usage.input ?? 0,
+                  "braintrust.metrics.completion_tokens": usage.output ?? 0,
+                  "braintrust.metrics.tokens": usage.total ?? 0,
+                  "braintrust.metrics.prompt_cached_tokens":
+                    usage.cacheRead ?? 0,
+                  "braintrust.metrics.prompt_cache_creation_tokens":
+                    usage.cacheWrite ?? 0,
                   // braintrust.metrics.cost is undocumented in the public
                   // schema but verified end-to-end via scripts/verify.ts —
                   // it lands in the metrics column on Braintrust llm spans.

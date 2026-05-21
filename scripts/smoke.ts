@@ -171,13 +171,23 @@ async function main() {
   );
 
   // Model usage (llm span with cost + tokens).
+  // Real field shape from src/infra/diagnostic-events.ts:
+  //   usage: { input, output, cacheRead, cacheWrite, promptTokens, total }
+  // NOT tokens.* (earlier smoke code used a fabricated shape that
+  // matched our buggy reader — false-positive verification).
   emit(
     ev({
       type: "model.usage",
       provider: "anthropic",
       model: "claude-sonnet-4-5",
       costUsd: 0.0123,
-      tokens: { input: 1024, output: 256, cache: 0, total: 1280 },
+      usage: {
+        input: 1024,
+        output: 256,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 1280,
+      },
       input: [
         { role: "system", content: "you are a smoke test" },
         { role: "user", content: "hello" },
