@@ -6,12 +6,13 @@
 // This file owns the stateful concerns: span lifecycle, parenting via
 // open-span maps, OTEL provider setup, subscription, and shutdown.
 //
-// Trust gate bypass: ctx.internalDiagnostics is only granted by openclaw
-// to "diagnostics-otel" and "diagnostics-prometheus" (per
-// src/plugins/services.ts). We import onInternalDiagnosticEvent
-// directly from the plugin SDK to subscribe without that grant. Tracked
-// in THE-36; the long-term fix is an upstream allowlist entry or a
-// capability-grant mechanism.
+// Subscription strategy: prefer ctx.internalDiagnostics?.onEvent when
+// the host grants it (currently only "diagnostics-otel" and
+// "diagnostics-prometheus" are allowlisted per upstream
+// src/plugins/services.ts). Fall back to importing
+// onInternalDiagnosticEvent from the plugin SDK directly — that export
+// is public and unguarded, so the fallback works on stock openclaw.
+// Upstream issue tracking the inconsistency: see README.
 
 import {
   context as otelContext,
@@ -26,7 +27,7 @@ import {
   BatchSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
-// Direct subscription bypasses the ctx.internalDiagnostics trust gate.
+// Fallback subscription when the host doesn't grant ctx.internalDiagnostics.
 import { onInternalDiagnosticEvent } from "openclaw/plugin-sdk/diagnostic-runtime";
 import {
   buildCommonAttrs,
@@ -134,17 +135,28 @@ export function createBraintrustOtelService() {
 
       let eventCount = 0;
       const eventCountByType = new Map<string, number>();
-      unsubscribe = onInternalDiagnosticEvent((event, meta) => {
+      const listener = (event: DiagnosticEvent, meta: { trusted: boolean }) => {
         if (!meta.trusted) return;
         eventCount++;
-        const t = (event as DiagnosticEvent).type ?? "(no-type)";
+        const t = event.type ?? "(no-type)";
         eventCountByType.set(t, (eventCountByType.get(t) ?? 0) + 1);
         try {
-          handle(event as DiagnosticEvent);
+          handle(event);
         } catch (err) {
           console.warn("[braintrust-otel] handler error", err);
         }
-      });
+      };
+
+      // Prefer the host-granted subscription if the trust gate allows it
+      // (currently only diagnostics-otel and diagnostics-prometheus are
+      // allowlisted upstream). Fall back to the public SDK export, which
+      // works on stock openclaw regardless of the gate.
+      const subscriptionSource: "ctx" | "sdk" = ctx.internalDiagnostics
+        ? "ctx"
+        : "sdk";
+      unsubscribe = ctx.internalDiagnostics
+        ? ctx.internalDiagnostics.onEvent(listener)
+        : onInternalDiagnosticEvent(listener);
 
       console.log(
         JSON.stringify({
@@ -155,6 +167,7 @@ export function createBraintrustOtelService() {
           tags: cfg.tags ?? [],
           sessionIdentifiers: sessIds,
           subscribed: typeof unsubscribe === "function",
+          subscriptionSource,
         }),
       );
 
