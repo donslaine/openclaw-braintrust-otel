@@ -11,17 +11,6 @@
       "tracesEndpoint": { "type": "string" },
       "serviceName": { "type": "string" },
       "tags": { "type": "array", "items": { "type": "string" } },
-      "captureContent": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "input": { "type": "boolean" },
-          "output": { "type": "boolean" },
-          "toolInputs": { "type": "boolean" },
-          "toolOutputs": { "type": "boolean" },
-          "systemPrompt": { "type": "boolean" }
-        }
-      },
       "sessionIdentifiers": {
         "type": "object",
         "additionalProperties": false,

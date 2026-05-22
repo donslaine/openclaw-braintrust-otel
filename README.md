@@ -23,7 +23,6 @@ marker; see the design doc's "ACP gap" section).
   "endpoint": "https://api.braintrust.dev/otel",
   "serviceName": "openclaw-jeffery",
   "tags": ["agent-jeffery"],
-  "captureContent": { "input": false, "output": true },
   "sessionIdentifiers": { "raw": false, "hash": true }
 }
 ```

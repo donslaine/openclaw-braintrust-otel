@@ -52,13 +52,6 @@ export interface BraintrustOtelConfig {
   tracesEndpoint?: string;
   serviceName?: string;
   tags?: string[];
-  captureContent?: {
-    input?: boolean;
-    output?: boolean;
-    toolInputs?: boolean;
-    toolOutputs?: boolean;
-    systemPrompt?: boolean;
-  };
   sessionIdentifiers?: {
     raw?: boolean;
     hash?: boolean;
@@ -67,13 +60,6 @@ export interface BraintrustOtelConfig {
 }
 
 const DEFAULT_ENDPOINT = "https://api.braintrust.dev/otel";
-const DEFAULT_CAPTURE = {
-  input: false,
-  output: true,
-  toolInputs: false,
-  toolOutputs: false,
-  systemPrompt: false,
-} as const;
 
 export function createBraintrustOtelService() {
   let provider: BasicTracerProvider | undefined;
@@ -113,7 +99,6 @@ export function createBraintrustOtelService() {
       const endpoint = cfg.endpoint ?? DEFAULT_ENDPOINT;
       const tracesEndpoint = cfg.tracesEndpoint ?? `${endpoint}/v1/traces`;
       const serviceName = cfg.serviceName ?? "openclaw";
-      const capture = { ...DEFAULT_CAPTURE, ...(cfg.captureContent ?? {}) };
       const sessIds = {
         raw: false,
         hash: true,
@@ -210,7 +195,6 @@ export function createBraintrustOtelService() {
           tracesEndpoint,
           serviceName,
           tags: cfg.tags ?? [],
-          captureContent: capture,
           sessionIdentifiers: sessIds,
           subscribed: typeof unsubscribe === "function",
         }),
@@ -427,22 +411,12 @@ export function createBraintrustOtelService() {
                 event["channel"],
               );
             }
-            // braintrust.input / braintrust.output:
-            //
-            // Diagnostic events DO NOT carry the LLM request/response
-            // body. The runtime explicitly counts response bytes but
-            // never stores the payload (privacy / size). To capture
-            // input/output text we would need a different integration
-            // point — wrap the model client at the provider level — not
-            // subscribe to diagnostics. Leaving these calls in place
-            // for the small chance an emitter passes them, but in
-            // practice they no-op.
-            if (capture.input && event["input"] !== undefined) {
-              setBraintrustContent(span, "input", event["input"]);
-            }
-            if (capture.output && event["output"] !== undefined) {
-              setBraintrustContent(span, "output", event["output"]);
-            }
+            // LLM input/output text is intentionally not captured:
+            // diagnostic events never carry request/response bodies
+            // (the runtime counts response bytes but discards the
+            // payload). Capturing I/O text requires a different
+            // integration point — wrap the model client at the
+            // provider level — which is a separate plugin shape.
             span.end();
             return;
           }
@@ -547,10 +521,6 @@ export function createBraintrustOtelService() {
               parentCtx,
             );
             span.setAttribute("braintrust.metadata.openclaw.tool_name", toolName);
-            // Optional tool input capture (off by default).
-            if (capture.toolInputs && event["paramsSummary"] !== undefined) {
-              setBraintrustContent(span, "input", event["paramsSummary"]);
-            }
             openTools.set(key, { span, toolName });
             return;
           }
@@ -631,25 +601,3 @@ export function createBraintrustOtelService() {
   };
 }
 
-function safeStringify(v: unknown): string {
-  try {
-    return typeof v === "string" ? v : JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
-
-// Per Braintrust docs: braintrust.input / braintrust.output take a string;
-// for arrays/objects (e.g. OpenAI message arrays) use the *_json variants
-// with a JSON-stringified payload.
-function setBraintrustContent(
-  span: Span,
-  kind: "input" | "output",
-  value: unknown,
-): void {
-  if (typeof value === "string") {
-    span.setAttribute(`braintrust.${kind}`, value);
-  } else {
-    span.setAttribute(`braintrust.${kind}_json`, safeStringify(value));
-  }
-}
