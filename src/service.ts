@@ -420,6 +420,54 @@ export function createBraintrustOtelService() {
             span.end();
             return;
           }
+          case "context.assembled": {
+            // Point-in-time event: emit a single span that captures
+            // token-budget visibility per turn. Parents to the open
+            // run when runId is known (it always is for this event,
+            // per the upstream DiagnosticContextAssembledEvent type).
+            const runId = event["runId"] as string | undefined;
+            const parent = runId ? openRuns.get(runId) : undefined;
+            const parentCtx = parent
+              ? trace.setSpan(otelContext.active(), parent)
+              : otelContext.active();
+            const span = tracer.startSpan(
+              "openclaw.context.assembled",
+              {
+                attributes: {
+                  ...commonAttrs(event),
+                  "braintrust.metadata.openclaw.provider":
+                    (event["provider"] as string) ?? "",
+                  "braintrust.metadata.openclaw.model":
+                    (event["model"] as string) ?? "",
+                  "braintrust.metadata.openclaw.channel":
+                    (event["channel"] as string) ?? "",
+                  "braintrust.metadata.openclaw.trigger":
+                    (event["trigger"] as string) ?? "",
+                  "braintrust.metadata.openclaw.message_count":
+                    (event["messageCount"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.history_text_chars":
+                    (event["historyTextChars"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.history_image_blocks":
+                    (event["historyImageBlocks"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.max_message_text_chars":
+                    (event["maxMessageTextChars"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.system_prompt_chars":
+                    (event["systemPromptChars"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.prompt_chars":
+                    (event["promptChars"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.prompt_images":
+                    (event["promptImages"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.context_token_budget":
+                    (event["contextTokenBudget"] as number) ?? 0,
+                  "braintrust.metadata.openclaw.reserve_tokens":
+                    (event["reserveTokens"] as number) ?? 0,
+                },
+              },
+              parentCtx,
+            );
+            span.end();
+            return;
+          }
           case "model.call.started": {
             const callId = event["callId"] as string | undefined;
             if (!callId || openModelCalls.has(callId)) return;
