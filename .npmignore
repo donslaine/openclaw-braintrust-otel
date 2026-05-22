@@ -1,0 +1,3 @@
+# Don't ship tests in the published tarball, but keep them in the repo
+src/**/__tests__/**
+src/**/*.test.ts

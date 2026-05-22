@@ -29,6 +29,8 @@
   },
   "files": [
     "dist",
+    "index.ts",
+    "src",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE",
@@ -62,7 +64,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./dist/index.js"
+      "./index.ts"
     ]
   }
 }
