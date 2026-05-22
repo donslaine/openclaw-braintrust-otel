@@ -292,11 +292,17 @@ export function createBraintrustOtelService() {
             return;
           }
           case "model.usage": {
-            const runId = event["runId"] as string | undefined;
-            const parentSpan = runId ? openRuns.get(runId) : undefined;
-            // Real field is `usage`, not `tokens` — verified against
-            // src/infra/diagnostic-events.ts. Field names inside `usage`:
-            //   input, output, cacheRead, cacheWrite, promptTokens, total
+            // model.usage event field shape verified against
+            // src/infra/diagnostic-events.ts. The event carries `usage`
+            // (cumulative tokens), `lastCallUsage` (per-call deltas),
+            // `context` (token budget), `costUsd`, `durationMs`, and
+            // `agentId` — all surfaced below.
+            //
+            // ORPHAN SPAN NOTE: this event does NOT carry runId or
+            // callId, so we cannot link it to its parent run/call span
+            // from the diagnostic payload alone. Spans land as orphans
+            // (root = self) and group via session_id_hash metadata.
+            // Accepted-and-documented in docs/braintrust-otel-plugin.md.
             const usage = (event["usage"] ?? {}) as {
               input?: number;
               output?: number;
@@ -305,14 +311,19 @@ export function createBraintrustOtelService() {
               promptTokens?: number;
               total?: number;
             };
-            // Nest under the run span using the real OTEL context API
-            // (W3C trace context). Braintrust uses standard parent linkage.
-            const parentCtx = parentSpan
-              ? trace.setSpan(otelContext.active(), parentSpan)
-              : otelContext.active();
-            const span = tracer.startSpan(
-              "openclaw.model.usage",
-              {
+            const lastCall = (event["lastCallUsage"] ?? {}) as {
+              input?: number;
+              output?: number;
+              cacheRead?: number;
+              cacheWrite?: number;
+              total?: number;
+            };
+            const contextInfo = (event["context"] ?? {}) as {
+              limit?: number;
+              used?: number;
+            };
+            // No parent linkage possible — see ORPHAN SPAN NOTE above.
+            const span = tracer.startSpan("openclaw.model.usage", {
                 attributes: {
                   ...commonAttrs(event),
                   "braintrust.span_attributes.type": "llm",
@@ -340,14 +351,92 @@ export function createBraintrustOtelService() {
                     (event["provider"] as string) ?? "",
                   "braintrust.metadata.openclaw.model":
                     (event["model"] as string) ?? "",
-                  ...sessionAttrs(event),
                 },
-              },
-              parentCtx,
-            );
-            // For non-string content (e.g. OpenAI-style message arrays),
-            // Braintrust expects the *_json variants with a JSON-stringified
-            // payload. Plain strings can use the bare braintrust.input/output.
+            });
+            // Optional per-call deltas. Useful when an agent makes many
+            // calls per run — usage.* fields are cumulative, lastCallUsage.*
+            // shows just the most recent call.
+            if (lastCall.input !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.last_call.prompt_tokens",
+                lastCall.input,
+              );
+            if (lastCall.output !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.last_call.completion_tokens",
+                lastCall.output,
+              );
+            if (lastCall.total !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.last_call.tokens",
+                lastCall.total,
+              );
+            if (lastCall.cacheRead !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.last_call.prompt_cached_tokens",
+                lastCall.cacheRead,
+              );
+            if (lastCall.cacheWrite !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.last_call.prompt_cache_creation_tokens",
+                lastCall.cacheWrite,
+              );
+            // Context-window telemetry — important for catching when an
+            // agent is creeping toward its token budget.
+            if (contextInfo.limit !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.context_limit",
+                contextInfo.limit,
+              );
+            if (contextInfo.used !== undefined)
+              span.setAttribute(
+                "braintrust.metadata.openclaw.context_used",
+                contextInfo.used,
+              );
+            if (
+              contextInfo.limit !== undefined &&
+              contextInfo.used !== undefined &&
+              contextInfo.limit > 0
+            ) {
+              span.setAttribute(
+                "braintrust.metrics.context_used_ratio",
+                contextInfo.used / contextInfo.limit,
+              );
+            }
+            // Call duration (when present).
+            if (typeof event["durationMs"] === "number") {
+              span.setAttribute(
+                "braintrust.metadata.openclaw.duration_ms",
+                event["durationMs"],
+              );
+            }
+            // agentId — present on real model.usage events but not on
+            // DiagnosticRunBaseEvent, so this is the canonical place to
+            // surface it.
+            if (typeof event["agentId"] === "string" && event["agentId"]) {
+              span.setAttribute(
+                "braintrust.metadata.openclaw.agent_id",
+                event["agentId"],
+              );
+            }
+            // Channel — model.usage carries channel; runs do too, so this
+            // is mostly redundant but useful when the run span is missing.
+            if (typeof event["channel"] === "string" && event["channel"]) {
+              span.setAttribute(
+                "braintrust.metadata.openclaw.channel",
+                event["channel"],
+              );
+            }
+            // braintrust.input / braintrust.output:
+            //
+            // Diagnostic events DO NOT carry the LLM request/response
+            // body. The runtime explicitly counts response bytes but
+            // never stores the payload (privacy / size). To capture
+            // input/output text we would need a different integration
+            // point — wrap the model client at the provider level — not
+            // subscribe to diagnostics. Leaving these calls in place
+            // for the small chance an emitter passes them, but in
+            // practice they no-op.
             if (capture.input && event["input"] !== undefined) {
               setBraintrustContent(span, "input", event["input"]);
             }
