@@ -1,14 +1,31 @@
 {
-  "name": "braintrust-otel",
-  "version": "0.0.1",
-  "private": true,
-  "description": "Internal OpenClaw exporter that emits Braintrust-shaped OTEL spans",
+  "name": "@donslaine/openclaw-braintrust-otel",
+  "version": "0.1.0-pre",
+  "description": "OpenClaw plugin: subscribes to internal diagnostics and emits Braintrust-shaped OTEL spans",
+  "license": "MIT",
+  "author": "donslaine",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/donslaine/openclaw-braintrust-otel.git"
+  },
+  "homepage": "https://github.com/donslaine/openclaw-braintrust-otel#readme",
+  "bugs": "https://github.com/donslaine/openclaw-braintrust-otel/issues",
+  "keywords": ["openclaw", "openclaw-plugin", "braintrust", "opentelemetry", "otel", "observability"],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "openclaw.plugin.json", "README.md", "LICENSE", "CHANGELOG.md"],
   "scripts": {
-    "smoke": "tsx scripts/smoke.ts",
-    "verify": "tsx scripts/verify.ts",
-    "inspect": "tsx scripts/inspect.ts",
-    "inspect:real": "tsx scripts/inspect-real.ts"
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "inspect:real": "tsx scripts/inspect-real.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
@@ -17,11 +34,16 @@
     "@opentelemetry/sdk-trace-base": "2.7.1",
     "@opentelemetry/semantic-conventions": "1.41.1"
   },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.20"
+  },
   "devDependencies": {
+    "@types/node": "^22.10.2",
+    "openclaw": "^2026.5.20",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   },
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./dist/index.js"]
   }
 }
