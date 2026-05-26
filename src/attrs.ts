@@ -4,6 +4,12 @@
 // service.ts wires these into Span lifecycle.
 
 import { createHash } from "node:crypto";
+import type {
+  CallSlot,
+  LlmInputPayload,
+  LlmOutputPayload,
+  ToolMiddlewarePayload,
+} from "./io-buffer.js";
 
 export type DiagnosticEvent = { type: string; [k: string]: unknown };
 
@@ -12,14 +18,29 @@ export type SessionIdOptions = {
   hash: boolean;
 };
 
+// Operator-supplied versioning labels. Travel on every span as
+// top-level `braintrust.metadata.*` so promoted dataset examples carry
+// them automatically and experiment views can slice by them.
+//
+// `openclawVersion` is read once at startup from the resolved openclaw
+// package.json; the rest come from plugin config (THE-47).
+export type VersioningOptions = {
+  openclawVersion?: string;
+  agentPromptVersion?: string;
+  toolPolicyVersion?: string;
+  runbookVersion?: string;
+  environment?: string;
+};
+
 export type CommonAttrOptions = {
   tags: string[];
   serviceName: string;
   sessIds: SessionIdOptions;
   salt: string;
+  versioning?: VersioningOptions;
 };
 
-export type AttrValue = string | number | string[];
+export type AttrValue = string | number | boolean | string[];
 export type AttrMap = Record<string, AttrValue>;
 
 export function hashId(salt: string, value: unknown): string | undefined {
@@ -56,6 +77,50 @@ export function buildSessionAttrs(
   return out;
 }
 
+// Lift native metadata Braintrust's UI auto-recognizes (model, provider,
+// agent_id, channel) from the event payload to top-level
+// `braintrust.metadata.*`. Also emits namespaced copies under
+// `braintrust.metadata.openclaw.*` so our own slicing keeps working
+// during the transition.
+//
+// `model` is passed through with provider prefix intact; Braintrust
+// strips the prefix server-side for column display.
+export function liftNativeMetadata(e: DiagnosticEvent): AttrMap {
+  const out: AttrMap = {};
+  const fields: Array<[string, string]> = [
+    ["provider", "provider"],
+    ["model", "model"],
+    ["agentId", "agent_id"],
+    ["channel", "channel"],
+  ];
+  for (const [src, dst] of fields) {
+    const v = e[src];
+    if (typeof v === "string" && v) {
+      out[`braintrust.metadata.${dst}`] = v;
+      out[`braintrust.metadata.openclaw.${dst}`] = v;
+    }
+  }
+  return out;
+}
+
+// Versioning labels pulled from the configured options. Travel on every
+// span so any promoted dataset example carries them.
+export function buildVersioningAttrs(opts: CommonAttrOptions): AttrMap {
+  const out: AttrMap = {};
+  const v = opts.versioning;
+  if (!v) return out;
+  if (v.openclawVersion)
+    out["braintrust.metadata.openclaw_version"] = v.openclawVersion;
+  if (v.agentPromptVersion)
+    out["braintrust.metadata.agent_prompt_version"] = v.agentPromptVersion;
+  if (v.toolPolicyVersion)
+    out["braintrust.metadata.tool_policy_version"] = v.toolPolicyVersion;
+  if (v.runbookVersion)
+    out["braintrust.metadata.runbook_version"] = v.runbookVersion;
+  if (v.environment) out["braintrust.metadata.environment"] = v.environment;
+  return out;
+}
+
 // Attributes that should appear on EVERY span we emit, so any span is
 // filterable by tag / service_name in BTQL. Braintrust auto-maps
 // braintrust.tags and braintrust.metadata.* only on spans that set them
@@ -67,16 +132,18 @@ export function buildCommonAttrs(
   return {
     "braintrust.tags": opts.tags,
     "braintrust.metadata.service_name": opts.serviceName,
+    ...buildVersioningAttrs(opts),
     ...buildSessionAttrs(e, opts),
+    ...liftNativeMetadata(e),
   };
 }
 
 export function buildRunAttrs(e: DiagnosticEvent, common: AttrMap): AttrMap {
-  const attrs: AttrMap = { ...common };
+  const attrs: AttrMap = {
+    ...common,
+    "braintrust.span_attributes.type": "task",
+  };
   const stringFields: Array<[string, string]> = [
-    ["channel", "channel"],
-    ["provider", "provider"],
-    ["model", "model"],
     ["trigger", "trigger"],
     ["agent", "agent"],
     ["sessionKind", "session_kind"],
@@ -88,6 +155,24 @@ export function buildRunAttrs(e: DiagnosticEvent, common: AttrMap): AttrMap {
     }
   }
   return attrs;
+}
+
+// Run-level input/output derived from the first llm_input.prompt and
+// the last llm_output.assistantTexts. Applied on run-close (peeked
+// non-consumingly so per-call slots remain available to model.call
+// spans). When no LLM I/O was captured for the run, returns empty.
+export function buildRunIoAttrs(io: {
+  firstInput?: LlmInputPayload;
+  lastOutput?: LlmOutputPayload;
+}): AttrMap {
+  const out: AttrMap = {};
+  if (io.firstInput?.prompt) {
+    out["braintrust.input"] = io.firstInput.prompt;
+  }
+  if (io.lastOutput && io.lastOutput.assistantTexts.length > 0) {
+    out["braintrust.output"] = io.lastOutput.assistantTexts.join("\n");
+  }
+  return out;
 }
 
 export type ModelUsageMetrics = {
@@ -138,8 +223,6 @@ export function buildModelUsageAttrs(
     "braintrust.metrics.prompt_cached_tokens": usage.cacheRead ?? 0,
     "braintrust.metrics.prompt_cache_creation_tokens": usage.cacheWrite ?? 0,
     "braintrust.metrics.cost": (e["costUsd"] as number) ?? 0,
-    "braintrust.metadata.openclaw.provider": (e["provider"] as string) ?? "",
-    "braintrust.metadata.openclaw.model": (e["model"] as string) ?? "",
   };
 
   const conditional: AttrMap = {};
@@ -176,10 +259,6 @@ export function buildModelUsageAttrs(
     conditional["braintrust.metadata.openclaw.duration_ms"] = e[
       "durationMs"
     ] as number;
-  if (typeof e["agentId"] === "string" && e["agentId"])
-    conditional["braintrust.metadata.openclaw.agent_id"] = e["agentId"];
-  if (typeof e["channel"] === "string" && e["channel"])
-    conditional["braintrust.metadata.openclaw.channel"] = e["channel"];
 
   return { attrs, conditional };
 }
@@ -190,9 +269,6 @@ export function buildContextAssembledAttrs(
 ): AttrMap {
   return {
     ...common,
-    "braintrust.metadata.openclaw.provider": (e["provider"] as string) ?? "",
-    "braintrust.metadata.openclaw.model": (e["model"] as string) ?? "",
-    "braintrust.metadata.openclaw.channel": (e["channel"] as string) ?? "",
     "braintrust.metadata.openclaw.trigger": (e["trigger"] as string) ?? "",
     "braintrust.metadata.openclaw.message_count":
       (e["messageCount"] as number) ?? 0,
@@ -221,8 +297,7 @@ export function buildModelCallStartedAttrs(
 ): AttrMap {
   return {
     ...common,
-    "braintrust.metadata.openclaw.provider": (e["provider"] as string) ?? "",
-    "braintrust.metadata.openclaw.model": (e["model"] as string) ?? "",
+    "braintrust.span_attributes.type": "llm",
     "braintrust.metadata.openclaw.api": (e["api"] as string) ?? "",
     "braintrust.metadata.openclaw.transport": (e["transport"] as string) ?? "",
     "braintrust.metadata.openclaw.context_token_budget":
@@ -246,10 +321,12 @@ export function buildModelCallCloseAttrs(e: DiagnosticEvent): AttrMap {
     out["braintrust.metadata.openclaw.response_bytes"] = e[
       "responseStreamBytes"
     ] as number;
-  if (e["timeToFirstByteMs"] !== undefined)
-    out["braintrust.metadata.openclaw.ttfb_ms"] = e[
-      "timeToFirstByteMs"
-    ] as number;
+  if (e["timeToFirstByteMs"] !== undefined) {
+    const ttfb = e["timeToFirstByteMs"] as number;
+    out["braintrust.metadata.openclaw.ttfb_ms"] = ttfb;
+    // Top-level native metric so Braintrust's TTFT column populates.
+    out["braintrust.metrics.time_to_first_token"] = ttfb;
+  }
   if (e.type === "model.call.error") {
     out["braintrust.metadata.openclaw.error_category"] =
       (e["errorCategory"] as string) ?? "";
@@ -257,6 +334,39 @@ export function buildModelCallCloseAttrs(e: DiagnosticEvent): AttrMap {
       out["braintrust.metadata.openclaw.failure_kind"] = e[
         "failureKind"
       ] as string;
+  }
+  return out;
+}
+
+// I/O attributes for a closed model.call span. Reads a CallSlot popped
+// from the IoBuffer. Returns empty when the buffer didn't capture
+// either input or output (content capture disabled, or the call hit
+// the gated path that skipped one of the hooks).
+export function buildModelCallIoAttrs(slot: CallSlot | undefined): AttrMap {
+  const out: AttrMap = {};
+  if (!slot) return out;
+  if (slot.input) {
+    out["braintrust.input_json"] = JSON.stringify({
+      systemPrompt: slot.input.systemPrompt,
+      prompt: slot.input.prompt,
+      historyMessages: slot.input.historyMessages ?? [],
+    });
+    if (Array.isArray(slot.input.tools) && slot.input.tools.length > 0) {
+      out["braintrust.metadata.tools"] = JSON.stringify(slot.input.tools);
+    }
+    if (slot.input.imagesCount !== undefined) {
+      out["braintrust.metadata.openclaw.images_count"] = slot.input.imagesCount;
+    }
+  }
+  if (slot.output) {
+    out["braintrust.output_json"] = JSON.stringify(slot.output.assistantTexts);
+    if (slot.output.resolvedRef) {
+      out["braintrust.metadata.openclaw.resolved_ref"] =
+        slot.output.resolvedRef;
+    }
+    if (slot.output.harnessId) {
+      out["braintrust.metadata.openclaw.harness_id"] = slot.output.harnessId;
+    }
   }
   return out;
 }
@@ -284,6 +394,29 @@ export function buildToolExecutionCloseAttrs(e: DiagnosticEvent): AttrMap {
   } else if (e.type === "tool.execution.blocked") {
     out["braintrust.metadata.openclaw.blocked_reason"] =
       (e["reason"] as string) ?? (e["deniedReason"] as string) ?? "blocked";
+  }
+  return out;
+}
+
+// I/O attributes for a closed tool.execution span. Reads a payload
+// popped from the IoBuffer's tool-middleware registry. args/result
+// serialized as JSON; tool_call_id and is_error surface as metadata.
+export function buildToolExecutionIoAttrs(
+  payload: ToolMiddlewarePayload | undefined,
+): AttrMap {
+  const out: AttrMap = {};
+  if (!payload) return out;
+  if (payload.args !== undefined) {
+    out["braintrust.input_json"] = JSON.stringify(payload.args);
+  }
+  if (payload.result !== undefined) {
+    out["braintrust.output_json"] = JSON.stringify(payload.result);
+  }
+  if (payload.toolCallId) {
+    out["braintrust.metadata.tool_call_id"] = payload.toolCallId;
+  }
+  if (payload.isError !== undefined) {
+    out["braintrust.metadata.is_error"] = payload.isError;
   }
   return out;
 }
