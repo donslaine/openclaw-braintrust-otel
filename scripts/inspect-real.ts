@@ -19,8 +19,6 @@
 //   --tree               group spans into trace trees
 //   --summary            print counts by span name + one sample per name
 
-import { setTimeout as sleep } from "node:timers/promises";
-
 const apiKey = process.env.BRAINTRUST_API_KEY;
 if (!apiKey) {
   console.error("BRAINTRUST_API_KEY is required");
@@ -63,13 +61,20 @@ type Span = {
 
 async function resolveProjectId(name: string): Promise<string> {
   const url = `https://api.braintrust.dev/v1/project?project_name=${encodeURIComponent(name)}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
-  if (!res.ok) throw new Error(`GET /v1/project ${res.status}: ${await res.text()}`);
-  const body = (await res.json()) as { objects?: Array<{ id: string; name: string }> };
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok)
+    throw new Error(`GET /v1/project ${res.status}: ${await res.text()}`);
+  const body = (await res.json()) as {
+    objects?: Array<{ id: string; name: string }>;
+  };
   const match = body.objects?.find((p) => p.name === name);
   if (!match) {
     const found = body.objects?.map((p) => p.name) ?? [];
-    throw new Error(`Project '${name}' not found. Available: ${JSON.stringify(found)}`);
+    throw new Error(
+      `Project '${name}' not found. Available: ${JSON.stringify(found)}`,
+    );
   }
   return match.id;
 }
@@ -77,12 +82,15 @@ async function resolveProjectId(name: string): Promise<string> {
 async function btql(query: string): Promise<Span[]> {
   const res = await fetch("https://api.braintrust.dev/btql", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({ query, fmt: "json" }),
   });
   if (!res.ok) throw new Error(`BTQL ${res.status}: ${await res.text()}`);
   const body = (await res.json()) as { data?: Span[] } | Span[];
-  return Array.isArray(body) ? body : body.data ?? [];
+  return Array.isArray(body) ? body : (body.data ?? []);
 }
 
 function truncate(s: string, n = 250) {
@@ -184,11 +192,15 @@ async function main() {
     }
 
     console.log("--- Counts by span name ---");
-    for (const [name, n] of [...countsByName.entries()].sort((a, b) => b[1] - a[1])) {
+    for (const [name, n] of [...countsByName.entries()].sort(
+      (a, b) => b[1] - a[1],
+    )) {
       console.log(`  ${n.toString().padStart(5)}  ${name}`);
     }
     console.log("\n--- Counts by span_attributes.type ---");
-    for (const [type, n] of [...countsByType.entries()].sort((a, b) => b[1] - a[1])) {
+    for (const [type, n] of [...countsByType.entries()].sort(
+      (a, b) => b[1] - a[1],
+    )) {
       console.log(`  ${n.toString().padStart(5)}  ${type}`);
     }
 

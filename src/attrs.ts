@@ -48,7 +48,8 @@ export function buildSessionAttrs(
     if (rih) out["braintrust.metadata.openclaw.run_id_hash"] = rih;
   }
   if (opts.sessIds.raw) {
-    if (sessionKey) out["braintrust.metadata.openclaw.session_key"] = sessionKey;
+    if (sessionKey)
+      out["braintrust.metadata.openclaw.session_key"] = sessionKey;
     if (sessionId) out["braintrust.metadata.openclaw.session_id"] = sessionId;
     if (runId) out["braintrust.metadata.openclaw.run_id"] = runId;
   }
@@ -70,10 +71,7 @@ export function buildCommonAttrs(
   };
 }
 
-export function buildRunAttrs(
-  e: DiagnosticEvent,
-  common: AttrMap,
-): AttrMap {
+export function buildRunAttrs(e: DiagnosticEvent, common: AttrMap): AttrMap {
   const attrs: AttrMap = { ...common };
   const stringFields: Array<[string, string]> = [
     ["channel", "channel"],
@@ -134,8 +132,7 @@ export function buildModelUsageAttrs(
     //   usage.total      -> tokens (total)
     //   usage.cacheRead  -> prompt_cached_tokens
     //   usage.cacheWrite -> prompt_cache_creation_tokens
-    "braintrust.metrics.prompt_tokens":
-      usage.promptTokens ?? usage.input ?? 0,
+    "braintrust.metrics.prompt_tokens": usage.promptTokens ?? usage.input ?? 0,
     "braintrust.metrics.completion_tokens": usage.output ?? 0,
     "braintrust.metrics.tokens": usage.total ?? 0,
     "braintrust.metrics.prompt_cached_tokens": usage.cacheRead ?? 0,
@@ -278,9 +275,7 @@ export function buildToolExecutionStartedAttrs(
 export function buildToolExecutionCloseAttrs(e: DiagnosticEvent): AttrMap {
   const out: AttrMap = {};
   if (e["durationMs"] !== undefined)
-    out["braintrust.metadata.openclaw.duration_ms"] = e[
-      "durationMs"
-    ] as number;
+    out["braintrust.metadata.openclaw.duration_ms"] = e["durationMs"] as number;
   if (e.type === "tool.execution.error") {
     out["braintrust.metadata.openclaw.error_category"] =
       (e["errorCategory"] as string) ?? "";

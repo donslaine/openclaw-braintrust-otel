@@ -106,8 +106,8 @@ export function createBraintrustOtelService() {
         ...(cfg.sessionIdentifiers ?? {}),
       };
       const salt = sessIds.hashSaltSecretRef
-        ? process.env[sessIds.hashSaltSecretRef] ?? ""
-        : process.env.BRAINTRUST_SESSION_HASH_SALT ?? "";
+        ? (process.env[sessIds.hashSaltSecretRef] ?? "")
+        : (process.env.BRAINTRUST_SESSION_HASH_SALT ?? "");
 
       const attrOpts: CommonAttrOptions = {
         tags: cfg.tags ?? [],
@@ -242,7 +242,9 @@ export function createBraintrustOtelService() {
             // alone. Spans land as orphans and group via session_id_hash.
             // Tracked in THE-43.
             const { attrs, conditional } = buildModelUsageAttrs(event, common);
-            const span = tracer.startSpan("openclaw.model.usage", { attributes: attrs });
+            const span = tracer.startSpan("openclaw.model.usage", {
+              attributes: attrs,
+            });
             applyAttrs(span, conditional);
             span.end();
             return;
@@ -342,15 +344,21 @@ export function createBraintrustOtelService() {
         unsubscribe?.();
       } catch {}
       for (const span of openRuns.values()) {
-        try { span.end(); } catch {}
+        try {
+          span.end();
+        } catch {}
       }
       openRuns.clear();
       for (const span of openModelCalls.values()) {
-        try { span.end(); } catch {}
+        try {
+          span.end();
+        } catch {}
       }
       openModelCalls.clear();
       for (const { span } of openTools.values()) {
-        try { span.end(); } catch {}
+        try {
+          span.end();
+        } catch {}
       }
       openTools.clear();
       await provider?.shutdown();
