@@ -15,12 +15,7 @@
 // Upstream issue tracking the inconsistency: see README.
 
 import { createRequire } from "node:module";
-import {
-  context as otelContext,
-  trace,
-  SpanStatusCode,
-  type Span,
-} from "@opentelemetry/api";
+import { trace } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
@@ -31,21 +26,11 @@ import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 // Fallback subscription when the host doesn't grant ctx.internalDiagnostics.
 import { onInternalDiagnosticEvent } from "openclaw/plugin-sdk/diagnostic-runtime";
 import {
-  buildCommonAttrs,
-  buildContextAssembledAttrs,
-  buildModelCallCloseAttrs,
-  buildModelCallIoAttrs,
-  buildModelCallStartedAttrs,
-  buildModelUsageAttrs,
-  buildRunAttrs,
-  buildRunIoAttrs,
-  buildToolExecutionCloseAttrs,
-  buildToolExecutionIoAttrs,
-  buildToolExecutionStartedAttrs,
   type CommonAttrOptions,
   type DiagnosticEvent,
   type VersioningOptions,
 } from "./attrs.js";
+import { createDiagnosticEventHandler } from "./event-handler.js";
 import { IoBuffer } from "./io-buffer.js";
 
 // Resolved at module load. Best-effort: if openclaw isn't on the
@@ -125,9 +110,9 @@ export function createBraintrustOtelService(
   const { ioBuffer } = opts;
   let provider: BasicTracerProvider | undefined;
   let unsubscribe: (() => void) | undefined;
-  const openRuns = new Map<string, Span>();
-  const openModelCalls = new Map<string, Span>();
-  const openTools = new Map<string, { span: Span; toolName: string }>();
+  // Populated in start() once the tracer is built; kept in outer scope
+  // so stop() can iterate them to end any in-flight spans on shutdown.
+  let handlerRef: ReturnType<typeof createDiagnosticEventHandler> | undefined;
 
   return {
     id: "braintrust-otel",
@@ -203,6 +188,12 @@ export function createBraintrustOtelService(
       trace.setGlobalTracerProvider(provider);
       const tracer = trace.getTracer("braintrust-otel");
 
+      // All event → span mapping lives in event-handler.ts so it can
+      // be tested against an in-memory exporter. The listener below
+      // just gates on the trusted flag, counts, and dispatches.
+      handlerRef = createDiagnosticEventHandler({ tracer, attrOpts, ioBuffer });
+      const handler = handlerRef;
+
       let eventCount = 0;
       const eventCountByType = new Map<string, number>();
       const listener = (event: DiagnosticEvent, meta: { trusted: boolean }) => {
@@ -211,7 +202,7 @@ export function createBraintrustOtelService(
         const t = event.type ?? "(no-type)";
         eventCountByType.set(t, (eventCountByType.get(t) ?? 0) + 1);
         try {
-          handle(event);
+          handler.handle(event);
         } catch (err) {
           console.warn("[braintrust-otel] handler error", err);
         }
@@ -276,9 +267,9 @@ export function createBraintrustOtelService(
             msg: "heartbeat",
             eventCount,
             byType,
-            openRuns: openRuns.size,
-            openModelCalls: openModelCalls.size,
-            openTools: openTools.size,
+            openRuns: handler.openRuns.size,
+            openModelCalls: handler.openModelCalls.size,
+            openTools: handler.openTools.size,
             ioBuffer: ioBuffer.stats(),
           }),
         );
@@ -289,226 +280,33 @@ export function createBraintrustOtelService(
         clearInterval(heartbeat);
         origUnsubscribe?.();
       };
-
-      function parentCtxFromRunId(runId: string | undefined) {
-        const span = runId ? openRuns.get(runId) : undefined;
-        return span
-          ? trace.setSpan(otelContext.active(), span)
-          : otelContext.active();
-      }
-
-      function applyAttrs(span: Span, attrs: Record<string, unknown>) {
-        for (const [k, v] of Object.entries(attrs)) {
-          span.setAttribute(k, v as never);
-        }
-      }
-
-      function handle(event: DiagnosticEvent) {
-        const common = buildCommonAttrs(event, attrOpts);
-        switch (event.type) {
-          case "run.started":
-          case "harness.run.started": {
-            const runId = (event["runId"] ?? event["id"]) as string | undefined;
-            if (!runId || openRuns.has(runId)) return;
-            const span = tracer.startSpan("openclaw.run", {
-              attributes: buildRunAttrs(event, common),
-            });
-            openRuns.set(runId, span);
-            return;
-          }
-          case "run.completed":
-          case "harness.run.completed":
-          case "harness.run.error": {
-            const runId = (event["runId"] ?? event["id"]) as string | undefined;
-            if (!runId) return;
-            const span = openRuns.get(runId);
-            if (!span) return;
-            // Peek (non-consuming) — per-call slots remain available
-            // for model.call spans that may still close after the run.
-            applyAttrs(span, buildRunIoAttrs(ioBuffer.peekRunIo(runId)));
-            if (event.type === "harness.run.error") {
-              span.setStatus({
-                code: SpanStatusCode.ERROR,
-                message: (event["error"] as string) ?? "run error",
-              });
-            }
-            span.end();
-            openRuns.delete(runId);
-            ioBuffer.clearRun(runId);
-            return;
-          }
-          case "model.usage": {
-            // model.usage carries no runId/callId; we parent it to the
-            // most-recently-opened model.call span for the same session,
-            // tracked in the IoBuffer. If no open call is registered
-            // (usage arrived after the call closed, or session ids are
-            // unavailable), fall back to an orphan span that groups
-            // visually in Braintrust via session_id_hash.
-            const sessionKey = event["sessionKey"] as string | undefined;
-            const sessionId = event["sessionId"] as string | undefined;
-            const parent = ioBuffer.getOpenModelCallSpanForSession(
-              sessionKey,
-              sessionId,
-            ) as Span | undefined;
-            const parentCtx = parent
-              ? trace.setSpan(otelContext.active(), parent)
-              : otelContext.active();
-            const { attrs, conditional } = buildModelUsageAttrs(event, common);
-            const span = tracer.startSpan(
-              "openclaw.model.usage",
-              { attributes: attrs },
-              parentCtx,
-            );
-            applyAttrs(span, conditional);
-            span.end();
-            return;
-          }
-          case "context.assembled": {
-            const runId = event["runId"] as string | undefined;
-            const span = tracer.startSpan(
-              "openclaw.context.assembled",
-              { attributes: buildContextAssembledAttrs(event, common) },
-              parentCtxFromRunId(runId),
-            );
-            span.end();
-            return;
-          }
-          case "model.call.started": {
-            const callId = event["callId"] as string | undefined;
-            if (!callId || openModelCalls.has(callId)) return;
-            const runId = event["runId"] as string | undefined;
-            const span = tracer.startSpan(
-              "openclaw.model.call",
-              { attributes: buildModelCallStartedAttrs(event, common) },
-              parentCtxFromRunId(runId),
-            );
-            openModelCalls.set(callId, span);
-            ioBuffer.setOpenModelCallSpanForSession(
-              event["sessionKey"] as string | undefined,
-              event["sessionId"] as string | undefined,
-              span,
-            );
-            return;
-          }
-          case "model.call.completed":
-          case "model.call.error": {
-            const callId = event["callId"] as string | undefined;
-            if (!callId) return;
-            const span = openModelCalls.get(callId);
-            if (!span) return;
-            applyAttrs(span, buildModelCallCloseAttrs(event));
-            // Pop the matching call slot from the IoBuffer and merge
-            // its input_json/output_json/tools into the span. Returns
-            // empty when content capture was off or the call hit a
-            // gated hook path (raw-run, prompt-error).
-            const runId = event["runId"] as string | undefined;
-            if (runId) {
-              applyAttrs(
-                span,
-                buildModelCallIoAttrs(ioBuffer.takeCallIo(runId)),
-              );
-            }
-            if (event.type === "model.call.error") {
-              span.setStatus({
-                code: SpanStatusCode.ERROR,
-                message:
-                  (event["errorCategory"] as string) ?? "model.call.error",
-              });
-            }
-            span.end();
-            openModelCalls.delete(callId);
-            ioBuffer.clearOpenModelCallSpanForSession(
-              event["sessionKey"] as string | undefined,
-              event["sessionId"] as string | undefined,
-              span,
-            );
-            return;
-          }
-          case "tool.execution.started": {
-            const toolName = (event["toolName"] as string) ?? "unknown";
-            const key =
-              (event["toolCallId"] as string | undefined) ??
-              `${event["runId"] ?? ""}:${toolName}:${event["ts"] ?? Date.now()}`;
-            if (openTools.has(key)) return;
-            const runId = event["runId"] as string | undefined;
-            const span = tracer.startSpan(
-              "openclaw.tool.execution",
-              { attributes: buildToolExecutionStartedAttrs(common, toolName) },
-              parentCtxFromRunId(runId),
-            );
-            openTools.set(key, { span, toolName });
-            return;
-          }
-          case "tool.execution.completed":
-          case "tool.execution.error":
-          case "tool.execution.blocked": {
-            const key =
-              (event["toolCallId"] as string | undefined) ??
-              [...openTools.keys()].find((k) =>
-                k.startsWith(`${event["runId"] ?? ""}:`),
-              );
-            if (!key) return;
-            const entry = openTools.get(key);
-            if (!entry) return;
-            const { span } = entry;
-            applyAttrs(span, buildToolExecutionCloseAttrs(event));
-            // Merge tool args/result captured via AgentToolResult
-            // middleware. Keyed by (runId, toolCallId); pulls and
-            // consumes from the IoBuffer.
-            const runId = event["runId"] as string | undefined;
-            const toolCallId = event["toolCallId"] as string | undefined;
-            if (runId && toolCallId) {
-              applyAttrs(
-                span,
-                buildToolExecutionIoAttrs(
-                  ioBuffer.takeToolIo(runId, toolCallId),
-                ),
-              );
-            }
-            if (event.type === "tool.execution.error") {
-              span.setStatus({
-                code: SpanStatusCode.ERROR,
-                message:
-                  (event["errorCategory"] as string) ?? "tool.execution.error",
-              });
-            } else if (event.type === "tool.execution.blocked") {
-              span.setStatus({
-                code: SpanStatusCode.ERROR,
-                message: "tool.execution.blocked",
-              });
-            }
-            span.end();
-            openTools.delete(key);
-            return;
-          }
-          default:
-            return;
-        }
-      }
     },
 
     async stop() {
       try {
         unsubscribe?.();
       } catch {}
-      for (const span of openRuns.values()) {
-        try {
-          span.end();
-        } catch {}
+      if (handlerRef) {
+        for (const span of handlerRef.openRuns.values()) {
+          try {
+            span.end();
+          } catch {}
+        }
+        handlerRef.openRuns.clear();
+        for (const span of handlerRef.openModelCalls.values()) {
+          try {
+            span.end();
+          } catch {}
+        }
+        handlerRef.openModelCalls.clear();
+        for (const { span } of handlerRef.openTools.values()) {
+          try {
+            span.end();
+          } catch {}
+        }
+        handlerRef.openTools.clear();
+        handlerRef = undefined;
       }
-      openRuns.clear();
-      for (const span of openModelCalls.values()) {
-        try {
-          span.end();
-        } catch {}
-      }
-      openModelCalls.clear();
-      for (const { span } of openTools.values()) {
-        try {
-          span.end();
-        } catch {}
-      }
-      openTools.clear();
       await provider?.shutdown();
       provider = undefined;
     },
