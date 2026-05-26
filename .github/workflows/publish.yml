@@ -1,0 +1,98 @@
+name: Publish to npm
+
+# Runs after a merge to main. Reads the version from package.json and
+# publishes only if that version is not already on npm — so unrelated
+# main pushes are skipped without failing. Bump the version in
+# package.json (and CHANGELOG) in the same PR that should trigger a
+# release.
+#
+# Auth: uses npm Trusted Publishing (OIDC) — no NPM_TOKEN required.
+# The trusted publisher must be configured on npmjs.com for this exact
+# repo + workflow filename before the first publish run.
+
+on:
+  push:
+    branches: [main]
+
+# Required for npm OIDC auth + provenance attestation.
+permissions:
+  contents: write # for git tag + GitHub release
+  id-token: write # for npm trusted publishing + provenance
+
+jobs:
+  publish:
+    name: Publish if version bumped
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags for release notes / tag creation
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm (trusted publishing requires >= 11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Read package version
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          NAME=$(node -p "require('./package.json').name")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Package: $NAME@$VERSION"
+
+      - name: Check if version already published
+        id: check
+        run: |
+          NAME="${{ steps.pkg.outputs.name }}"
+          VERSION="${{ steps.pkg.outputs.version }}"
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "$NAME@$VERSION already on npm — skipping publish."
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            echo "$NAME@$VERSION not yet on npm — will publish."
+          fi
+
+      - name: Install dependencies
+        if: steps.check.outputs.already_published == 'false'
+        run: npm ci
+
+      - name: Build
+        if: steps.check.outputs.already_published == 'false'
+        run: npm run build
+
+      - name: Tests
+        if: steps.check.outputs.already_published == 'false'
+        run: npm test
+
+      - name: Publish to npm
+        if: steps.check.outputs.already_published == 'false'
+        run: npm publish --access public --provenance
+
+      - name: Create git tag and GitHub release
+        if: steps.check.outputs.already_published == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.pkg.outputs.version }}"
+          TAG="v$VERSION"
+          git tag "$TAG"
+          git push origin "$TAG"
+          # Body: pull the section for this version out of CHANGELOG.md if present,
+          # otherwise a minimal one-liner. The awk grabs the heading for $VERSION
+          # and everything up to (but not including) the next ## heading.
+          BODY=$(awk -v v="$VERSION" '
+            $0 ~ "^## .*"v {flag=1; print; next}
+            flag && /^## / {flag=0}
+            flag {print}
+          ' CHANGELOG.md 2>/dev/null || true)
+          if [ -z "$BODY" ]; then
+            BODY="Release $TAG. See CHANGELOG.md."
+          fi
+          gh release create "$TAG" --title "$TAG" --notes "$BODY"
