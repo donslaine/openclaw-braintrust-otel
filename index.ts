@@ -1,4 +1,5 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { IoBuffer } from "./src/io-buffer.js";
 import { createBraintrustOtelService } from "./src/service.js";
 
 export default definePluginEntry({
@@ -7,6 +8,7 @@ export default definePluginEntry({
   description:
     "Subscribes to OpenClaw internal diagnostics and emits Braintrust-shaped OTEL spans.",
   register(api) {
-    api.registerService(createBraintrustOtelService());
+    const ioBuffer = new IoBuffer();
+    api.registerService(createBraintrustOtelService({ ioBuffer }));
   },
 });
