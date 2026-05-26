@@ -41,6 +41,7 @@ import {
   type CommonAttrOptions,
   type DiagnosticEvent,
 } from "./attrs.js";
+import { IoBuffer } from "./io-buffer.js";
 
 type ServiceCtx = {
   internalDiagnostics?: {
@@ -67,7 +68,21 @@ export interface BraintrustOtelConfig {
 
 const DEFAULT_ENDPOINT = "https://api.braintrust.dev/otel";
 
-export function createBraintrustOtelService() {
+export type BraintrustOtelServiceOptions = {
+  /**
+   * Shared in-memory buffer for LLM input/output and tool middleware
+   * payloads, plus the session-keyed open-model.call registry used to
+   * parent model.usage events. Created in the plugin entry so the buffer
+   * outlives service start/stop cycles and is reachable from hooks
+   * registered alongside the service.
+   */
+  ioBuffer: IoBuffer;
+};
+
+export function createBraintrustOtelService(
+  opts: BraintrustOtelServiceOptions,
+) {
+  const { ioBuffer } = opts;
   let provider: BasicTracerProvider | undefined;
   let unsubscribe: (() => void) | undefined;
   const openRuns = new Map<string, Span>();
@@ -183,6 +198,7 @@ export function createBraintrustOtelService() {
             openRuns: openRuns.size,
             openModelCalls: openModelCalls.size,
             openTools: openTools.size,
+            ioBuffer: ioBuffer.stats(),
           }),
         );
       }, 60_000);
@@ -234,17 +250,31 @@ export function createBraintrustOtelService() {
             }
             span.end();
             openRuns.delete(runId);
+            ioBuffer.clearRun(runId);
             return;
           }
           case "model.usage": {
-            // Orphan span: model.usage carries no runId/callId, so it
-            // cannot be linked to a parent run/call from the payload
-            // alone. Spans land as orphans and group via session_id_hash.
-            // Tracked in THE-43.
+            // model.usage carries no runId/callId; we parent it to the
+            // most-recently-opened model.call span for the same session,
+            // tracked in the IoBuffer. If no open call is registered
+            // (usage arrived after the call closed, or session ids are
+            // unavailable), fall back to an orphan span that groups
+            // visually in Braintrust via session_id_hash.
+            const sessionKey = event["sessionKey"] as string | undefined;
+            const sessionId = event["sessionId"] as string | undefined;
+            const parent = ioBuffer.getOpenModelCallSpanForSession(
+              sessionKey,
+              sessionId,
+            ) as Span | undefined;
+            const parentCtx = parent
+              ? trace.setSpan(otelContext.active(), parent)
+              : otelContext.active();
             const { attrs, conditional } = buildModelUsageAttrs(event, common);
-            const span = tracer.startSpan("openclaw.model.usage", {
-              attributes: attrs,
-            });
+            const span = tracer.startSpan(
+              "openclaw.model.usage",
+              { attributes: attrs },
+              parentCtx,
+            );
             applyAttrs(span, conditional);
             span.end();
             return;
@@ -269,6 +299,11 @@ export function createBraintrustOtelService() {
               parentCtxFromRunId(runId),
             );
             openModelCalls.set(callId, span);
+            ioBuffer.setOpenModelCallSpanForSession(
+              event["sessionKey"] as string | undefined,
+              event["sessionId"] as string | undefined,
+              span,
+            );
             return;
           }
           case "model.call.completed":
@@ -287,6 +322,11 @@ export function createBraintrustOtelService() {
             }
             span.end();
             openModelCalls.delete(callId);
+            ioBuffer.clearOpenModelCallSpanForSession(
+              event["sessionKey"] as string | undefined,
+              event["sessionId"] as string | undefined,
+              span,
+            );
             return;
           }
           case "tool.execution.started": {
