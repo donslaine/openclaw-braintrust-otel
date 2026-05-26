@@ -16,7 +16,9 @@ Five span types, all carrying `braintrust.tags`, `braintrust.metadata.service_na
 | `openclaw.tool.execution`    | `tool.execution.started/completed/error/blocked`               | tool name, duration, error category / blocked reason                                                                                                                                                         |
 | `openclaw.context.assembled` | `context.assembled`                                            | per-turn token-budget visibility: message count, history/system/prompt chars, image blocks, context token budget, reserve tokens                                                                             |
 
-`openclaw.run` is the trace root. `model.call`, `tool.execution`, and `context.assembled` parent to it via `runId`. `model.usage` is currently emitted as an orphan span (see Known limitations).
+`openclaw.run` is the trace root. `model.call`, `tool.execution`, and `context.assembled` parent to it via `runId`. `model.usage` parents to the most-recently-opened `model.call` span for its session; it falls back to an orphan when no open call is registered.
+
+With `captureContent.enabled = true` (see [Eval-grade capture](#eval-grade-capture)), `model.call` and `tool.execution` spans also carry full `braintrust.input_json` / `braintrust.output_json`, and the `openclaw.run` span carries `braintrust.input` / `braintrust.output` derived from the run's first prompt and last assistant response.
 
 ## Install
 
@@ -45,6 +47,15 @@ All optional:
     "raw": false,
     "hash": true,
     "hashSaltSecretRef": "BRAINTRUST_SESSION_HASH_SALT"
+  },
+  "captureContent": {
+    "enabled": false
+  },
+  "versioning": {
+    "agentPromptVersion": "jeffery-v3",
+    "toolPolicyVersion": "default-v2",
+    "runbookVersion": "m1-runbook-2026-05-26",
+    "environment": "prod"
   }
 }
 ```
@@ -55,24 +66,39 @@ All optional:
 - **`sessionIdentifiers.raw`** — when true, emits raw `sessionKey`/`sessionId`/`runId`. Off by default. Only safe if your session keys are not sensitive (e.g. cron names, not phone numbers or account ids).
 - **`sessionIdentifiers.hash`** — when true (default), emits SHA-256(salt + id) truncated to 16 hex chars.
 - **`sessionIdentifiers.hashSaltSecretRef`** — name of the env var holding the salt. Defaults to `BRAINTRUST_SESSION_HASH_SALT`.
+- **`captureContent.enabled`** — when true, exports raw LLM prompts, assistant outputs, tool args, and tool results. **Default false.** See [Eval-grade capture](#eval-grade-capture) for the privacy posture before enabling.
+- **`versioning.*`** — operator labels that travel on every span as top-level `braintrust.metadata.*`. Promoted dataset examples carry them automatically, so experiments can slice regressions by prompt/policy/runbook/environment. `openclaw_version` is added automatically from the resolved openclaw package; the four below are operator-supplied.
 
-## Privacy posture
+## Eval-grade capture
 
-- LLM request/response bodies are **never** captured. Diagnostic events don't carry them — the OpenClaw runtime counts response bytes but discards the payload. Capturing I/O text would require a different integration point (wrapping the model client at the provider level) and is out of scope for this plugin.
-- Session identifiers are hashed by default. Raw ids are opt-in.
-- Choose a salt your team controls. Don't commit it to source.
+`captureContent.enabled = true` turns this plugin from observability-grade into eval-grade. The same span tree gets:
+
+- `braintrust.input_json` and `braintrust.output_json` on every `openclaw.model.call` span (system prompt + prompt + history; assistant texts).
+- `braintrust.metadata.tools` on `model.call` spans whose call had tool definitions attached.
+- `braintrust.input_json` and `braintrust.output_json` on `openclaw.tool.execution` spans (tool args and result), plus `braintrust.metadata.tool_call_id` and `braintrust.metadata.is_error`.
+- `braintrust.input` and `braintrust.output` on `openclaw.run` spans, derived from the first user prompt and the last assistant response of the run.
+
+Mechanism: an in-memory `IoBuffer` subscribes to OpenClaw's plugin SDK hooks (`llm_input`, `llm_output`, `AgentToolResultMiddleware`) and joins payloads to the matching span at close time. Hooks register at plugin init but no-op until `captureContent.enabled` flips to true, so registering the plugin in a config that doesn't set the flag has the same behavior as v0.1.0.
+
+### Privacy posture
+
+- **Content capture is OFF by default.**
+- When enabled, the plugin exfiltrates raw user prompts, assistant outputs, tool args, and tool results to the configured Braintrust endpoint.
+- This is acceptable **only** when the destination Braintrust instance is internal/admin-only and approved for that data.
+- For client-facing or externally shared deployments: do **not** enable `captureContent` without an explicit per-deployment privacy review. The plugin logs a loud warning at startup whenever the flag is on so accidental enablement is hard to miss.
+- Session identifiers remain hashed by default regardless of `captureContent`. Raw ids are still a separate opt-in via `sessionIdentifiers.raw`.
 
 ## Known limitations
 
-- **`model.usage` is orphan-parented.** Upstream `DiagnosticUsageEvent` carries `sessionKey`/`sessionId` but not `runId` or `callId`, so the usage span cannot be linked to its parent run/call from the payload alone. Spans group visually in Braintrust via the `session_id_hash` metadata column. Will be fixed when openclaw propagates trace context into the event or when we add an in-memory `session → last open run` map.
 - **Trust gate inconsistency.** Upstream openclaw allowlists only `diagnostics-otel` and `diagnostics-prometheus` to receive `ctx.internalDiagnostics`. However, `onInternalDiagnosticEvent` is publicly exported from `openclaw/plugin-sdk/diagnostic-runtime`, so any plugin can subscribe regardless. This plugin prefers the host-granted `ctx.internalDiagnostics` path when available and falls back to the public SDK export otherwise. The startup log records which path is active (`subscriptionSource: "ctx" | "sdk"`).
+- **`model.usage` orphan fallback.** `DiagnosticUsageEvent` carries `sessionKey`/`sessionId` but not `runId` or `callId`. The plugin parents the usage span to the most-recently-opened `model.call` span for the session; if no open call is registered (usage arrived after close, or session ids absent), the span falls back to its orphan form and groups visually via the `session_id_hash` metadata column.
 
 ## Development
 
 ```sh
 npm install
 npm run typecheck
-npm test          # 32 unit tests covering attribute-mapping for every span type
+npm test          # 77 unit tests covering attribute-mapping + IoBuffer lifecycle
 npm run build     # tsc -> dist/
 ```
 
