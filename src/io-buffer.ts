@@ -70,8 +70,14 @@ type RunBuffer = {
 export type IoBufferOptions = {
   /** Max LLM call slots retained per run. Older slots are dropped on overflow. */
   maxCallsPerRun?: number;
-  /** Predicate consulted on every record* call. Returns false to no-op. */
-  enabled?: () => boolean;
+  /**
+   * Initial enabled state. The service flips this at start() based on
+   * the resolved `captureContent.enabled` config via setEnabled().
+   * Default is true so tests don't need to opt in; the plugin entry
+   * constructs the buffer with `false` to keep content capture off
+   * until config explicitly turns it on.
+   */
+  enabled?: boolean;
 };
 
 export class IoBuffer {
@@ -79,24 +85,37 @@ export class IoBuffer {
   /** sessionKey || sessionId → most-recently-opened open model.call span. */
   private openModelCallBySession = new Map<string, unknown>();
   private readonly maxCalls: number;
-  private readonly enabledFn: () => boolean;
+  private enabled: boolean;
 
   constructor(opts: IoBufferOptions = {}) {
     this.maxCalls = Math.max(1, opts.maxCallsPerRun ?? 50);
-    this.enabledFn = opts.enabled ?? (() => true);
+    this.enabled = opts.enabled ?? true;
+  }
+
+  /**
+   * Flip the content-capture gate. Called by service.start() once the
+   * plugin config has been resolved. Hooks registered at module load
+   * (before start) gate their record* calls on this value.
+   */
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
   }
 
   // ---- LLM I/O ----------------------------------------------------------
 
   recordLlmInput(payload: LlmInputPayload): void {
-    if (!this.enabledFn()) return;
+    if (!this.enabled) return;
     const buf = this.ensure(payload.runId);
     buf.calls.push({ input: payload });
     this.trim(buf);
   }
 
   recordLlmOutput(payload: LlmOutputPayload): void {
-    if (!this.enabledFn()) return;
+    if (!this.enabled) return;
     const buf = this.ensure(payload.runId);
     // Match to the most recent call slot that has an input but no output.
     for (let i = buf.calls.length - 1; i >= 0; i--) {
@@ -169,7 +188,7 @@ export class IoBuffer {
     payload: ToolMiddlewarePayload,
     runId: string | undefined,
   ): void {
-    if (!this.enabledFn()) return;
+    if (!this.enabled) return;
     if (!runId) return;
     const buf = this.ensure(runId);
     buf.toolCalls.set(payload.toolCallId, payload);

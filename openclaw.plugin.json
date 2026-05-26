@@ -19,6 +19,27 @@
           "hash": { "type": "boolean" },
           "hashSaltSecretRef": { "type": "string" }
         }
+      },
+      "captureContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "When true, captures raw LLM prompts, assistant outputs, tool args, and tool results into Braintrust spans. Default false. Only safe on internal/admin-only Braintrust instances."
+          }
+        }
+      },
+      "versioning": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Operator-supplied labels that travel on every span as top-level braintrust.metadata.* so promoted dataset examples carry them. openclaw_version is read automatically from the resolved openclaw package and does not need to be set here.",
+        "properties": {
+          "agentPromptVersion": { "type": "string" },
+          "toolPolicyVersion": { "type": "string" },
+          "runbookVersion": { "type": "string" },
+          "environment": { "type": "string" }
+        }
       }
     }
   }

@@ -110,10 +110,24 @@ describe("IoBuffer — LLM I/O", () => {
     expect(buf.takeCallIo("r1")).toBeUndefined();
   });
 
-  it("no-ops when enabled() returns false", () => {
-    const buf = new IoBuffer({ enabled: () => false });
+  it("no-ops when constructed with enabled: false", () => {
+    const buf = new IoBuffer({ enabled: false });
     buf.recordLlmInput(input("r1", "hi"));
     buf.recordLlmOutput(output("r1", "hello"));
+    expect(buf.takeCallIo("r1")).toBeUndefined();
+  });
+
+  it("flips capture on/off live via setEnabled", () => {
+    const buf = new IoBuffer({ enabled: false });
+    buf.recordLlmInput(input("r1", "p1"));
+    expect(buf.isEnabled()).toBe(false);
+    expect(buf.takeCallIo("r1")).toBeUndefined();
+    buf.setEnabled(true);
+    expect(buf.isEnabled()).toBe(true);
+    buf.recordLlmInput(input("r1", "p2"));
+    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p2");
+    buf.setEnabled(false);
+    buf.recordLlmInput(input("r1", "p3"));
     expect(buf.takeCallIo("r1")).toBeUndefined();
   });
 
@@ -167,7 +181,7 @@ describe("IoBuffer — tool middleware payloads", () => {
   });
 
   it("no-ops tool capture when disabled", () => {
-    const buf = new IoBuffer({ enabled: () => false });
+    const buf = new IoBuffer({ enabled: false });
     buf.recordToolResult(tool("call-1", "exec"), "r1");
     expect(buf.takeToolIo("r1", "call-1")).toBeUndefined();
   });

@@ -82,11 +82,19 @@ export interface BraintrustOtelConfig {
     hash?: boolean;
     hashSaltSecretRef?: string;
   };
+  // Content capture is OFF by default. When enabled, the plugin exports
+  // raw user prompts, assistant outputs, tool args, and tool results to
+  // the configured Braintrust endpoint. Safe ONLY on internal/admin-only
+  // Braintrust instances. Client-facing gateways must not enable this
+  // without a per-deployment privacy review.
+  captureContent?: {
+    enabled?: boolean;
+  };
   // Versioning labels travel on every span as top-level
   // `braintrust.metadata.*` so dataset examples promoted from real
-  // traces carry them automatically. Schema validation lands in THE-47;
-  // this shape is read leniently here so an operator can start setting
-  // values before the full config schema ships.
+  // traces carry them automatically. `openclaw_version` is read
+  // automatically from the resolved openclaw package; the four below
+  // are operator-supplied.
   versioning?: {
     agentPromptVersion?: string;
     toolPolicyVersion?: string;
@@ -104,6 +112,9 @@ export type BraintrustOtelServiceOptions = {
    * parent model.usage events. Created in the plugin entry so the buffer
    * outlives service start/stop cycles and is reachable from hooks
    * registered alongside the service.
+   *
+   * The service calls `ioBuffer.setEnabled(...)` at start() to apply
+   * the resolved `captureContent.enabled` config.
    */
   ioBuffer: IoBuffer;
 };
@@ -168,6 +179,13 @@ export function createBraintrustOtelService(
         versioning,
       };
 
+      // Flip the IoBuffer's enabled gate to the configured
+      // captureContent.enabled value. Hooks registered at plugin init
+      // (before start runs) read this through ioBuffer's record* paths,
+      // so this is what actually turns content capture on or off.
+      const captureContentEnabled = cfg.captureContent?.enabled === true;
+      ioBuffer.setEnabled(captureContentEnabled);
+
       const exporter = new OTLPTraceExporter({
         url: tracesEndpoint,
         headers: {
@@ -210,6 +228,20 @@ export function createBraintrustOtelService(
         ? ctx.internalDiagnostics.onEvent(listener)
         : onInternalDiagnosticEvent(listener);
 
+      // Versioning fields the operator actually set — drop unset keys
+      // from the startup log so it's clear what's live.
+      const versioningSet: Record<string, string> = {};
+      if (versioning.openclawVersion)
+        versioningSet.openclawVersion = versioning.openclawVersion;
+      if (versioning.agentPromptVersion)
+        versioningSet.agentPromptVersion = versioning.agentPromptVersion;
+      if (versioning.toolPolicyVersion)
+        versioningSet.toolPolicyVersion = versioning.toolPolicyVersion;
+      if (versioning.runbookVersion)
+        versioningSet.runbookVersion = versioning.runbookVersion;
+      if (versioning.environment)
+        versioningSet.environment = versioning.environment;
+
       console.log(
         JSON.stringify({
           tag: "braintrust-otel",
@@ -220,8 +252,20 @@ export function createBraintrustOtelService(
           sessionIdentifiers: sessIds,
           subscribed: typeof unsubscribe === "function",
           subscriptionSource,
+          captureContent: { enabled: captureContentEnabled },
+          versioning: versioningSet,
         }),
       );
+
+      // Loud warning when content capture is enabled — operators must
+      // see this so accidental enablement on a client-facing gateway is
+      // hard to miss. Pairs with the "admin-only Braintrust" framing in
+      // the README and the M1 Runbook.
+      if (captureContentEnabled) {
+        console.warn(
+          "[braintrust-otel] captureContent.enabled = true. The plugin is exporting raw LLM prompts, assistant outputs, and tool I/O to Braintrust. Only safe on internal/admin-only Braintrust instances. Verify per-deployment privacy posture before leaving this on.",
+        );
+      }
 
       const heartbeat = setInterval(() => {
         const byType: Record<string, number> = {};
