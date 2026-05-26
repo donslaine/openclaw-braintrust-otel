@@ -65,6 +65,13 @@ export type CallSlot = {
 type RunBuffer = {
   calls: CallSlot[];
   toolCalls: Map<string, ToolMiddlewarePayload>;
+  // Run-level snapshots updated on every record. Live separately from
+  // `calls` so they survive when takeCallIo consumes individual slots
+  // (model.call.completed runs before run.completed in a typical
+  // sequence — peekRunIo at run-close needs first/last to still exist
+  // even though every paired slot has already been popped).
+  firstInput?: LlmInputPayload;
+  lastOutput?: LlmOutputPayload;
 };
 
 export type IoBufferOptions = {
@@ -111,12 +118,14 @@ export class IoBuffer {
     if (!this.enabled) return;
     const buf = this.ensure(payload.runId);
     buf.calls.push({ input: payload });
+    if (!buf.firstInput) buf.firstInput = payload;
     this.trim(buf);
   }
 
   recordLlmOutput(payload: LlmOutputPayload): void {
     if (!this.enabled) return;
     const buf = this.ensure(payload.runId);
+    buf.lastOutput = payload;
     // Match to the most recent call slot that has an input but no output.
     for (let i = buf.calls.length - 1; i >= 0; i--) {
       const slot = buf.calls[i];
@@ -156,7 +165,10 @@ export class IoBuffer {
   /**
    * Non-consuming peek used by the run-level attribute mapper to derive
    * `braintrust.input` (first prompt) and `braintrust.output` (last
-   * assistant text) when the run span closes.
+   * assistant text) when the run span closes. Reads from the run-level
+   * snapshots, which are not affected by takeCallIo consumption — so
+   * this still returns the right values after every per-call slot has
+   * been popped at model.call.completed time.
    */
   peekRunIo(runId: string): {
     firstInput?: LlmInputPayload;
@@ -164,22 +176,7 @@ export class IoBuffer {
   } {
     const buf = this.byRun.get(runId);
     if (!buf) return {};
-    let firstInput: LlmInputPayload | undefined;
-    for (const slot of buf.calls) {
-      if (slot.input) {
-        firstInput = slot.input;
-        break;
-      }
-    }
-    let lastOutput: LlmOutputPayload | undefined;
-    for (let i = buf.calls.length - 1; i >= 0; i--) {
-      const slot = buf.calls[i];
-      if (slot && slot.output) {
-        lastOutput = slot.output;
-        break;
-      }
-    }
-    return { firstInput, lastOutput };
+    return { firstInput: buf.firstInput, lastOutput: buf.lastOutput };
   }
 
   // ---- Tool middleware payloads ----------------------------------------
