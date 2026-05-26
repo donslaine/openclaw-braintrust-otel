@@ -1,0 +1,4 @@
+# Baseline prettier reformat. Configure git locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+1cdd6bdc29ad838fecd028c1f02719d429aacba3

@@ -8,13 +8,13 @@ Gives you per-run, per-model-call, per-tool, per-turn observability for any [Ope
 
 Five span types, all carrying `braintrust.tags`, `braintrust.metadata.service_name`, and hashed session identifiers so any span is filterable by tag or service in Braintrust:
 
-| Span | Source events | Highlights |
-|------|---------------|------------|
-| `openclaw.run` | `run.started/completed`, `harness.run.started/completed/error` | channel, provider, model, trigger, agent, session kind |
-| `openclaw.model.call` | `model.call.started/completed/error` | provider/model/api/transport, request/response bytes, TTFB, duration, error category, upstream request id hash |
-| `openclaw.model.usage` | `model.usage` | `prompt_tokens`, `completion_tokens`, `tokens`, `prompt_cached_tokens`, `prompt_cache_creation_tokens`, `cost` (auto-mapped to Braintrust's metrics column), plus per-call deltas and context-budget metrics |
-| `openclaw.tool.execution` | `tool.execution.started/completed/error/blocked` | tool name, duration, error category / blocked reason |
-| `openclaw.context.assembled` | `context.assembled` | per-turn token-budget visibility: message count, history/system/prompt chars, image blocks, context token budget, reserve tokens |
+| Span                         | Source events                                                  | Highlights                                                                                                                                                                                                   |
+| ---------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `openclaw.run`               | `run.started/completed`, `harness.run.started/completed/error` | channel, provider, model, trigger, agent, session kind                                                                                                                                                       |
+| `openclaw.model.call`        | `model.call.started/completed/error`                           | provider/model/api/transport, request/response bytes, TTFB, duration, error category, upstream request id hash                                                                                               |
+| `openclaw.model.usage`       | `model.usage`                                                  | `prompt_tokens`, `completion_tokens`, `tokens`, `prompt_cached_tokens`, `prompt_cache_creation_tokens`, `cost` (auto-mapped to Braintrust's metrics column), plus per-call deltas and context-budget metrics |
+| `openclaw.tool.execution`    | `tool.execution.started/completed/error/blocked`               | tool name, duration, error category / blocked reason                                                                                                                                                         |
+| `openclaw.context.assembled` | `context.assembled`                                            | per-turn token-budget visibility: message count, history/system/prompt chars, image blocks, context token budget, reserve tokens                                                                             |
 
 `openclaw.run` is the trace root. `model.call`, `tool.execution`, and `context.assembled` parent to it via `runId`. `model.usage` is currently emitted as an orphan span (see Known limitations).
 
