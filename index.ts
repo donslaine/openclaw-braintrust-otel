@@ -7,19 +7,12 @@ import {
 } from "./src/io-buffer.js";
 import { createBraintrustOtelService } from "./src/service.js";
 
-// THE-45 plumbing. Content capture is gated by a hardcoded constant
-// until the config piece (THE-47) lands. While CAPTURE_CONTENT is false
-// the buffer no-ops on every record* call, so registering the hooks is
-// safe but they collect nothing. THE-47 will replace this constant with
-// a check against ctx.config.plugins.entries["braintrust-otel"].config.captureContent.enabled.
-const CAPTURE_CONTENT = false;
-
 // One buffer per process. Hooks fire before the service starts (plugin
 // init), and may keep firing across hot-reloads of the service, so the
-// buffer must outlive the service factory's lifecycle.
-const ioBuffer = new IoBuffer({
-  enabled: () => CAPTURE_CONTENT,
-});
+// buffer must outlive the service factory's lifecycle. Constructed
+// disabled — service.start() flips the gate based on the resolved
+// `captureContent.enabled` config (default OFF — privacy).
+const ioBuffer = new IoBuffer({ enabled: false });
 
 export default definePluginEntry({
   id: "braintrust-otel",
