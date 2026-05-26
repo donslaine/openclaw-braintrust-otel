@@ -1,5 +1,10 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { IoBuffer, type LlmInputPayload, type LlmOutputPayload, type ToolMiddlewarePayload } from "./src/io-buffer.js";
+import {
+  IoBuffer,
+  type LlmInputPayload,
+  type LlmOutputPayload,
+  type ToolMiddlewarePayload,
+} from "./src/io-buffer.js";
 import { createBraintrustOtelService } from "./src/service.js";
 
 // THE-45 plumbing. Content capture is gated by a hardcoded constant
@@ -42,15 +47,13 @@ export default definePluginEntry({
         console.warn("[braintrust-otel] llm_output handler error", err);
       }
     });
-    api.registerAgentToolResultMiddleware(
-      (event: unknown, ctx: unknown) => {
-        try {
-          const runId = (ctx as { runId?: string } | undefined)?.runId;
-          ioBuffer.recordToolResult(event as ToolMiddlewarePayload, runId);
-        } catch (err) {
-          console.warn("[braintrust-otel] tool middleware handler error", err);
-        }
-      },
-    );
+    api.registerAgentToolResultMiddleware((event: unknown, ctx: unknown) => {
+      try {
+        const runId = (ctx as { runId?: string } | undefined)?.runId;
+        ioBuffer.recordToolResult(event as ToolMiddlewarePayload, runId);
+      } catch (err) {
+        console.warn("[braintrust-otel] tool middleware handler error", err);
+      }
+    });
   },
 });

@@ -165,7 +165,10 @@ export class IoBuffer {
 
   // ---- Tool middleware payloads ----------------------------------------
 
-  recordToolResult(payload: ToolMiddlewarePayload, runId: string | undefined): void {
+  recordToolResult(
+    payload: ToolMiddlewarePayload,
+    runId: string | undefined,
+  ): void {
     if (!this.enabledFn()) return;
     if (!runId) return;
     const buf = this.ensure(runId);

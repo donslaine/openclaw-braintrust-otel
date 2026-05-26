@@ -79,7 +79,9 @@ export type BraintrustOtelServiceOptions = {
   ioBuffer: IoBuffer;
 };
 
-export function createBraintrustOtelService(opts: BraintrustOtelServiceOptions) {
+export function createBraintrustOtelService(
+  opts: BraintrustOtelServiceOptions,
+) {
   const { ioBuffer } = opts;
   let provider: BasicTracerProvider | undefined;
   let unsubscribe: (() => void) | undefined;
