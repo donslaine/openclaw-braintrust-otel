@@ -79,7 +79,7 @@ npm run build     # tsc -> dist/
 Live trace inspection against Braintrust (requires `BRAINTRUST_API_KEY`):
 
 ```sh
-npm run inspect:real -- --project smith-industries --tag agent-myagent --summary
+npm run inspect:real -- --project my-project --tag agent-myagent --summary
 ```
 
 ## License
