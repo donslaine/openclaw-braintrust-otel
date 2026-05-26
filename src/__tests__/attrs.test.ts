@@ -4,16 +4,22 @@ import {
   buildCommonAttrs,
   buildContextAssembledAttrs,
   buildModelCallCloseAttrs,
+  buildModelCallIoAttrs,
   buildModelCallStartedAttrs,
   buildModelUsageAttrs,
   buildRunAttrs,
+  buildRunIoAttrs,
   buildSessionAttrs,
   buildToolExecutionCloseAttrs,
+  buildToolExecutionIoAttrs,
   buildToolExecutionStartedAttrs,
+  buildVersioningAttrs,
   hashId,
+  liftNativeMetadata,
   type CommonAttrOptions,
   type DiagnosticEvent,
 } from "../attrs.js";
+import type { CallSlot, ToolMiddlewarePayload } from "../io-buffer.js";
 
 // Cast helper: the upstream types are a discriminated union, but our pure
 // mappers take a structural `DiagnosticEvent` (string-keyed) since they
@@ -122,62 +128,137 @@ describe("buildCommonAttrs", () => {
 });
 
 describe("buildRunAttrs", () => {
-  it("maps string fields with snake_case rename for sessionKind", () => {
-    const common = buildCommonAttrs({ type: "run.started" }, baseOpts);
-    const e = evt({
+  it("sets span type=task and maps trigger/agent/sessionKind", () => {
+    const e: DiagnosticEvent = {
       type: "run.started",
       runId: "r1",
       channel: "telegram",
       provider: "anthropic",
       model: "claude-sonnet-4-6",
       trigger: "user",
-    } as unknown as DiagnosticEventPayload);
-    // agent / sessionKind are non-standard on run.started — pass via the
-    // structural shape to verify our mapper picks them up.
-    const eExtra: DiagnosticEvent = {
-      ...e,
       agent: "jeffery",
       sessionKind: "direct",
     };
-    const out = buildRunAttrs(eExtra, common);
-    expect(out["braintrust.metadata.openclaw.channel"]).toBe("telegram");
-    expect(out["braintrust.metadata.openclaw.provider"]).toBe("anthropic");
-    expect(out["braintrust.metadata.openclaw.model"]).toBe("claude-sonnet-4-6");
+    const common = buildCommonAttrs(e, baseOpts);
+    const out = buildRunAttrs(e, common);
+    expect(out["braintrust.span_attributes.type"]).toBe("task");
     expect(out["braintrust.metadata.openclaw.trigger"]).toBe("user");
     expect(out["braintrust.metadata.openclaw.agent"]).toBe("jeffery");
     expect(out["braintrust.metadata.openclaw.session_kind"]).toBe("direct");
+    // Lifted via common: native top-level + namespaced both present.
+    expect(out["braintrust.metadata.channel"]).toBe("telegram");
+    expect(out["braintrust.metadata.openclaw.channel"]).toBe("telegram");
+    expect(out["braintrust.metadata.provider"]).toBe("anthropic");
+    expect(out["braintrust.metadata.openclaw.provider"]).toBe("anthropic");
+    expect(out["braintrust.metadata.model"]).toBe("claude-sonnet-4-6");
+    expect(out["braintrust.metadata.openclaw.model"]).toBe("claude-sonnet-4-6");
   });
 
   it("omits string fields that are missing or empty", () => {
-    const common = buildCommonAttrs({ type: "run.started" }, baseOpts);
+    const common = buildCommonAttrs(
+      { type: "run.started", provider: "" },
+      baseOpts,
+    );
     const out = buildRunAttrs(
       { type: "run.started", runId: "r1", provider: "" },
       common,
     );
     expect(out["braintrust.metadata.openclaw.provider"]).toBeUndefined();
     expect(out["braintrust.metadata.openclaw.channel"]).toBeUndefined();
+    expect(out["braintrust.metadata.openclaw.trigger"]).toBeUndefined();
+  });
+});
+
+describe("liftNativeMetadata", () => {
+  it("lifts model/provider/agentId/channel to top-level AND namespaced", () => {
+    const out = liftNativeMetadata({
+      type: "x",
+      provider: "openrouter",
+      model: "openai/gpt-5.5",
+      agentId: "jeffery",
+      channel: "telegram",
+    });
+    expect(out["braintrust.metadata.provider"]).toBe("openrouter");
+    expect(out["braintrust.metadata.openclaw.provider"]).toBe("openrouter");
+    expect(out["braintrust.metadata.model"]).toBe("openai/gpt-5.5");
+    expect(out["braintrust.metadata.openclaw.model"]).toBe("openai/gpt-5.5");
+    expect(out["braintrust.metadata.agent_id"]).toBe("jeffery");
+    expect(out["braintrust.metadata.openclaw.agent_id"]).toBe("jeffery");
+    expect(out["braintrust.metadata.channel"]).toBe("telegram");
+    expect(out["braintrust.metadata.openclaw.channel"]).toBe("telegram");
+  });
+
+  it("preserves provider prefix on model — Braintrust strips server-side", () => {
+    const out = liftNativeMetadata({
+      type: "x",
+      model: "anthropic/claude-sonnet-4-6",
+    });
+    expect(out["braintrust.metadata.model"]).toBe(
+      "anthropic/claude-sonnet-4-6",
+    );
+  });
+
+  it("omits absent or empty fields", () => {
+    const out = liftNativeMetadata({ type: "x", provider: "", model: "m" });
+    expect(out["braintrust.metadata.provider"]).toBeUndefined();
+    expect(out["braintrust.metadata.openclaw.provider"]).toBeUndefined();
+    expect(out["braintrust.metadata.model"]).toBe("m");
+  });
+});
+
+describe("buildVersioningAttrs", () => {
+  it("emits all configured versioning fields", () => {
+    const out = buildVersioningAttrs({
+      ...baseOpts,
+      versioning: {
+        openclawVersion: "2026.5.20",
+        agentPromptVersion: "jeffery-v3",
+        toolPolicyVersion: "default-v2",
+        runbookVersion: "m1-runbook-2026-05-26",
+        environment: "prod",
+      },
+    });
+    expect(out["braintrust.metadata.openclaw_version"]).toBe("2026.5.20");
+    expect(out["braintrust.metadata.agent_prompt_version"]).toBe("jeffery-v3");
+    expect(out["braintrust.metadata.tool_policy_version"]).toBe("default-v2");
+    expect(out["braintrust.metadata.runbook_version"]).toBe(
+      "m1-runbook-2026-05-26",
+    );
+    expect(out["braintrust.metadata.environment"]).toBe("prod");
+  });
+
+  it("returns empty when versioning is absent", () => {
+    expect(buildVersioningAttrs(baseOpts)).toEqual({});
+  });
+
+  it("only emits fields that are set (no empty placeholders)", () => {
+    const out = buildVersioningAttrs({
+      ...baseOpts,
+      versioning: { environment: "dev" },
+    });
+    expect(out["braintrust.metadata.environment"]).toBe("dev");
+    expect(out["braintrust.metadata.openclaw_version"]).toBeUndefined();
+    expect(out["braintrust.metadata.agent_prompt_version"]).toBeUndefined();
   });
 });
 
 describe("buildModelUsageAttrs", () => {
   it("maps tokens, cost, and provider/model into the attrs object", () => {
-    const common = buildCommonAttrs({ type: "model.usage" }, baseOpts);
-    const { attrs, conditional } = buildModelUsageAttrs(
-      {
-        type: "model.usage",
-        provider: "anthropic",
-        model: "claude",
-        costUsd: 0.0123,
-        usage: {
-          input: 100,
-          output: 50,
-          total: 150,
-          cacheRead: 10,
-          cacheWrite: 5,
-        },
+    const e: DiagnosticEvent = {
+      type: "model.usage",
+      provider: "anthropic",
+      model: "claude",
+      costUsd: 0.0123,
+      usage: {
+        input: 100,
+        output: 50,
+        total: 150,
+        cacheRead: 10,
+        cacheWrite: 5,
       },
-      common,
-    );
+    };
+    const common = buildCommonAttrs(e, baseOpts);
+    const { attrs, conditional } = buildModelUsageAttrs(e, common);
     expect(attrs["braintrust.span_attributes.type"]).toBe("llm");
     expect(attrs["braintrust.metrics.prompt_tokens"]).toBe(100);
     expect(attrs["braintrust.metrics.completion_tokens"]).toBe(50);
@@ -185,6 +266,8 @@ describe("buildModelUsageAttrs", () => {
     expect(attrs["braintrust.metrics.prompt_cached_tokens"]).toBe(10);
     expect(attrs["braintrust.metrics.prompt_cache_creation_tokens"]).toBe(5);
     expect(attrs["braintrust.metrics.cost"]).toBe(0.0123);
+    // provider/model now flow in through `common` via liftNativeMetadata.
+    expect(attrs["braintrust.metadata.provider"]).toBe("anthropic");
     expect(attrs["braintrust.metadata.openclaw.provider"]).toBe("anthropic");
     expect(Object.keys(conditional)).toHaveLength(0);
   });
@@ -270,30 +353,27 @@ describe("buildModelUsageAttrs", () => {
     ).toBeUndefined();
   });
 
-  it("includes durationMs, agentId, channel when present", () => {
-    const common = buildCommonAttrs({ type: "model.usage" }, baseOpts);
-    const { conditional } = buildModelUsageAttrs(
-      {
-        type: "model.usage",
-        durationMs: 1234,
-        agentId: "jeffery",
-        channel: "telegram",
-      },
-      common,
-    );
+  it("includes durationMs in conditional; agentId/channel flow via common", () => {
+    const e: DiagnosticEvent = {
+      type: "model.usage",
+      durationMs: 1234,
+      agentId: "jeffery",
+      channel: "telegram",
+    };
+    const common = buildCommonAttrs(e, baseOpts);
+    const { attrs, conditional } = buildModelUsageAttrs(e, common);
     expect(conditional["braintrust.metadata.openclaw.duration_ms"]).toBe(1234);
-    expect(conditional["braintrust.metadata.openclaw.agent_id"]).toBe(
-      "jeffery",
-    );
-    expect(conditional["braintrust.metadata.openclaw.channel"]).toBe(
-      "telegram",
-    );
+    // agentId/channel now flow through common via liftNativeMetadata,
+    // not through the per-span conditional path.
+    expect(attrs["braintrust.metadata.agent_id"]).toBe("jeffery");
+    expect(attrs["braintrust.metadata.openclaw.agent_id"]).toBe("jeffery");
+    expect(attrs["braintrust.metadata.channel"]).toBe("telegram");
+    expect(attrs["braintrust.metadata.openclaw.channel"]).toBe("telegram");
   });
 });
 
 describe("buildContextAssembledAttrs", () => {
   it("maps the full DiagnosticContextAssembledEvent field set", () => {
-    const common = buildCommonAttrs({ type: "context.assembled" }, baseOpts);
     const e = evt({
       type: "context.assembled",
       runId: "r1",
@@ -311,6 +391,7 @@ describe("buildContextAssembledAttrs", () => {
       contextTokenBudget: 180_000,
       reserveTokens: 8000,
     } as unknown as DiagnosticEventPayload);
+    const common = buildCommonAttrs(e, baseOpts);
     const out = buildContextAssembledAttrs(e, common);
     expect(out["braintrust.metadata.openclaw.message_count"]).toBe(12);
     expect(out["braintrust.metadata.openclaw.history_text_chars"]).toBe(4567);
@@ -325,6 +406,8 @@ describe("buildContextAssembledAttrs", () => {
       180_000,
     );
     expect(out["braintrust.metadata.openclaw.reserve_tokens"]).toBe(8000);
+    // Lifted via common.
+    expect(out["braintrust.metadata.provider"]).toBe("anthropic");
     expect(out["braintrust.metadata.openclaw.provider"]).toBe("anthropic");
   });
 
@@ -341,20 +424,20 @@ describe("buildContextAssembledAttrs", () => {
 });
 
 describe("buildModelCallStartedAttrs", () => {
-  it("maps provider/model/api/transport/budget/upstream-hash", () => {
-    const common = buildCommonAttrs({ type: "model.call.started" }, baseOpts);
-    const out = buildModelCallStartedAttrs(
-      {
-        type: "model.call.started",
-        provider: "anthropic",
-        model: "claude",
-        api: "messages",
-        transport: "http",
-        contextTokenBudget: 180_000,
-        upstreamRequestIdHash: "abc123",
-      },
-      common,
-    );
+  it("sets type=llm and maps api/transport/budget/upstream-hash", () => {
+    const e: DiagnosticEvent = {
+      type: "model.call.started",
+      provider: "anthropic",
+      model: "claude",
+      api: "messages",
+      transport: "http",
+      contextTokenBudget: 180_000,
+      upstreamRequestIdHash: "abc123",
+    };
+    const common = buildCommonAttrs(e, baseOpts);
+    const out = buildModelCallStartedAttrs(e, common);
+    expect(out["braintrust.span_attributes.type"]).toBe("llm");
+    expect(out["braintrust.metadata.provider"]).toBe("anthropic");
     expect(out["braintrust.metadata.openclaw.provider"]).toBe("anthropic");
     expect(out["braintrust.metadata.openclaw.api"]).toBe("messages");
     expect(out["braintrust.metadata.openclaw.transport"]).toBe("http");
@@ -368,7 +451,7 @@ describe("buildModelCallStartedAttrs", () => {
 });
 
 describe("buildModelCallCloseAttrs", () => {
-  it("includes duration always and bytes/ttfb when present", () => {
+  it("includes duration, bytes, ttfb_ms + time_to_first_token mirror", () => {
     const out = buildModelCallCloseAttrs({
       type: "model.call.completed",
       durationMs: 1500,
@@ -380,6 +463,17 @@ describe("buildModelCallCloseAttrs", () => {
     expect(out["braintrust.metadata.openclaw.request_bytes"]).toBe(4096);
     expect(out["braintrust.metadata.openclaw.response_bytes"]).toBe(8192);
     expect(out["braintrust.metadata.openclaw.ttfb_ms"]).toBe(300);
+    // Native top-level metric mirrors the namespaced value.
+    expect(out["braintrust.metrics.time_to_first_token"]).toBe(300);
+  });
+
+  it("omits time_to_first_token when timeToFirstByteMs is absent", () => {
+    const out = buildModelCallCloseAttrs({
+      type: "model.call.completed",
+      durationMs: 100,
+    });
+    expect(out["braintrust.metrics.time_to_first_token"]).toBeUndefined();
+    expect(out["braintrust.metadata.openclaw.ttfb_ms"]).toBeUndefined();
   });
 
   it("adds error_category + failure_kind on model.call.error", () => {
@@ -464,5 +558,244 @@ describe("buildToolExecutionCloseAttrs", () => {
       type: "tool.execution.blocked",
     });
     expect(out["braintrust.metadata.openclaw.blocked_reason"]).toBe("blocked");
+  });
+});
+
+describe("buildModelCallIoAttrs", () => {
+  function inputSlot(extra: Partial<CallSlot["input"]> = {}): CallSlot {
+    return {
+      input: {
+        runId: "r1",
+        prompt: "hi",
+        systemPrompt: "you are jeffery",
+        historyMessages: [{ role: "user", content: "hello" }],
+        imagesCount: 0,
+        ...extra,
+      },
+    };
+  }
+
+  it("returns empty when slot is undefined", () => {
+    expect(buildModelCallIoAttrs(undefined)).toEqual({});
+  });
+
+  it("serializes input as JSON with systemPrompt, prompt, history", () => {
+    const out = buildModelCallIoAttrs(inputSlot());
+    expect(out["braintrust.input_json"]).toBe(
+      JSON.stringify({
+        systemPrompt: "you are jeffery",
+        prompt: "hi",
+        historyMessages: [{ role: "user", content: "hello" }],
+      }),
+    );
+  });
+
+  it("emits metadata.tools when input has a non-empty tools array", () => {
+    const out = buildModelCallIoAttrs(
+      inputSlot({ tools: [{ name: "shell.exec" }] }),
+    );
+    expect(out["braintrust.metadata.tools"]).toBe(
+      JSON.stringify([{ name: "shell.exec" }]),
+    );
+  });
+
+  it("omits metadata.tools when tools is empty or absent", () => {
+    expect(
+      buildModelCallIoAttrs(inputSlot())["braintrust.metadata.tools"],
+    ).toBeUndefined();
+    expect(
+      buildModelCallIoAttrs(inputSlot({ tools: [] }))[
+        "braintrust.metadata.tools"
+      ],
+    ).toBeUndefined();
+  });
+
+  it("serializes assistantTexts as output_json", () => {
+    const slot: CallSlot = {
+      output: {
+        runId: "r1",
+        assistantTexts: ["sure thing", "here you go"],
+      },
+    };
+    const out = buildModelCallIoAttrs(slot);
+    expect(out["braintrust.output_json"]).toBe(
+      JSON.stringify(["sure thing", "here you go"]),
+    );
+  });
+
+  it("emits resolved_ref and harness_id when output has them", () => {
+    const slot: CallSlot = {
+      output: {
+        runId: "r1",
+        assistantTexts: ["ok"],
+        resolvedRef: "anthropic/claude-sonnet-4-6",
+        harnessId: "pi",
+      },
+    };
+    const out = buildModelCallIoAttrs(slot);
+    expect(out["braintrust.metadata.openclaw.resolved_ref"]).toBe(
+      "anthropic/claude-sonnet-4-6",
+    );
+    expect(out["braintrust.metadata.openclaw.harness_id"]).toBe("pi");
+  });
+
+  it("handles input-only and output-only slots without crashing", () => {
+    const inputOnly = buildModelCallIoAttrs(inputSlot());
+    expect(inputOnly["braintrust.input_json"]).toBeDefined();
+    expect(inputOnly["braintrust.output_json"]).toBeUndefined();
+
+    const outputOnly = buildModelCallIoAttrs({
+      output: { runId: "r1", assistantTexts: ["x"] },
+    });
+    expect(outputOnly["braintrust.input_json"]).toBeUndefined();
+    expect(outputOnly["braintrust.output_json"]).toBeDefined();
+  });
+});
+
+describe("buildToolExecutionIoAttrs", () => {
+  function payload(
+    extra: Partial<ToolMiddlewarePayload> = {},
+  ): ToolMiddlewarePayload {
+    return {
+      toolCallId: "call-1",
+      toolName: "shell.exec",
+      args: { cmd: "ls", cwd: "/tmp" },
+      result: "file1\nfile2\n",
+      isError: false,
+      ...extra,
+    };
+  }
+
+  it("returns empty when payload is undefined", () => {
+    expect(buildToolExecutionIoAttrs(undefined)).toEqual({});
+  });
+
+  it("serializes args and result as JSON, surfaces tool_call_id + is_error", () => {
+    const out = buildToolExecutionIoAttrs(payload());
+    expect(out["braintrust.input_json"]).toBe(
+      JSON.stringify({ cmd: "ls", cwd: "/tmp" }),
+    );
+    expect(out["braintrust.output_json"]).toBe(
+      JSON.stringify("file1\nfile2\n"),
+    );
+    expect(out["braintrust.metadata.tool_call_id"]).toBe("call-1");
+    expect(out["braintrust.metadata.is_error"]).toBe(false);
+  });
+
+  it("emits is_error=true when payload errored", () => {
+    const out = buildToolExecutionIoAttrs(payload({ isError: true }));
+    expect(out["braintrust.metadata.is_error"]).toBe(true);
+  });
+
+  it("omits attrs whose source fields are absent", () => {
+    const out = buildToolExecutionIoAttrs({
+      toolCallId: "call-1",
+      toolName: "x",
+    });
+    expect(out["braintrust.input_json"]).toBeUndefined();
+    expect(out["braintrust.output_json"]).toBeUndefined();
+    expect(out["braintrust.metadata.is_error"]).toBeUndefined();
+    expect(out["braintrust.metadata.tool_call_id"]).toBe("call-1");
+  });
+
+  it("serializes complex args/result structures", () => {
+    const out = buildToolExecutionIoAttrs(
+      payload({
+        args: { a: 1, nested: { b: [2, 3] } },
+        result: { ok: true, items: ["x", "y"] },
+      }),
+    );
+    expect(JSON.parse(out["braintrust.input_json"] as string)).toEqual({
+      a: 1,
+      nested: { b: [2, 3] },
+    });
+    expect(JSON.parse(out["braintrust.output_json"] as string)).toEqual({
+      ok: true,
+      items: ["x", "y"],
+    });
+  });
+});
+
+describe("buildRunIoAttrs", () => {
+  it("returns empty when both inputs are absent", () => {
+    expect(buildRunIoAttrs({})).toEqual({});
+  });
+
+  it("emits braintrust.input from firstInput.prompt", () => {
+    const out = buildRunIoAttrs({
+      firstInput: {
+        runId: "r1",
+        prompt: "what is the weather",
+        historyMessages: [],
+        imagesCount: 0,
+      },
+    });
+    expect(out["braintrust.input"]).toBe("what is the weather");
+  });
+
+  it("joins lastOutput.assistantTexts into braintrust.output with newlines", () => {
+    const out = buildRunIoAttrs({
+      lastOutput: {
+        runId: "r1",
+        assistantTexts: ["sunny", "75 degrees"],
+      },
+    });
+    expect(out["braintrust.output"]).toBe("sunny\n75 degrees");
+  });
+
+  it("omits braintrust.output when assistantTexts is empty", () => {
+    const out = buildRunIoAttrs({
+      lastOutput: { runId: "r1", assistantTexts: [] },
+    });
+    expect(out["braintrust.output"]).toBeUndefined();
+  });
+
+  it("emits both input and output when both peeked", () => {
+    const out = buildRunIoAttrs({
+      firstInput: {
+        runId: "r1",
+        prompt: "ping",
+        historyMessages: [],
+        imagesCount: 0,
+      },
+      lastOutput: { runId: "r1", assistantTexts: ["pong"] },
+    });
+    expect(out["braintrust.input"]).toBe("ping");
+    expect(out["braintrust.output"]).toBe("pong");
+  });
+});
+
+describe("buildCommonAttrs — integration", () => {
+  it("merges tags, service_name, versioning, session hashes, and native lift", () => {
+    const opts: CommonAttrOptions = {
+      ...baseOpts,
+      versioning: {
+        openclawVersion: "2026.5.20",
+        agentPromptVersion: "v3",
+        environment: "prod",
+      },
+    };
+    const e: DiagnosticEvent = {
+      type: "model.call.started",
+      sessionKey: "sk",
+      provider: "openrouter",
+      model: "openai/gpt-5.5",
+      agentId: "jeffery",
+      channel: "telegram",
+    };
+    const out = buildCommonAttrs(e, opts);
+    expect(out["braintrust.tags"]).toEqual(["agent-test"]);
+    expect(out["braintrust.metadata.service_name"]).toBe("openclaw-test");
+    expect(out["braintrust.metadata.openclaw_version"]).toBe("2026.5.20");
+    expect(out["braintrust.metadata.agent_prompt_version"]).toBe("v3");
+    expect(out["braintrust.metadata.environment"]).toBe("prod");
+    expect(out["braintrust.metadata.openclaw.session_key_hash"]).toMatch(
+      /^[0-9a-f]{16}$/,
+    );
+    expect(out["braintrust.metadata.provider"]).toBe("openrouter");
+    expect(out["braintrust.metadata.openclaw.provider"]).toBe("openrouter");
+    expect(out["braintrust.metadata.model"]).toBe("openai/gpt-5.5");
+    expect(out["braintrust.metadata.agent_id"]).toBe("jeffery");
+    expect(out["braintrust.metadata.channel"]).toBe("telegram");
   });
 });

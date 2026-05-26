@@ -14,6 +14,7 @@
 // is public and unguarded, so the fallback works on stock openclaw.
 // Upstream issue tracking the inconsistency: see README.
 
+import { createRequire } from "node:module";
 import {
   context as otelContext,
   trace,
@@ -33,15 +34,32 @@ import {
   buildCommonAttrs,
   buildContextAssembledAttrs,
   buildModelCallCloseAttrs,
+  buildModelCallIoAttrs,
   buildModelCallStartedAttrs,
   buildModelUsageAttrs,
   buildRunAttrs,
+  buildRunIoAttrs,
   buildToolExecutionCloseAttrs,
+  buildToolExecutionIoAttrs,
   buildToolExecutionStartedAttrs,
   type CommonAttrOptions,
   type DiagnosticEvent,
+  type VersioningOptions,
 } from "./attrs.js";
 import { IoBuffer } from "./io-buffer.js";
+
+// Resolved at module load. Best-effort: if openclaw isn't on the
+// resolution path (test sandbox, unusual install layout), the
+// openclaw_version metadata is omitted rather than blocking startup.
+const OPENCLAW_VERSION: string | undefined = (() => {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require("openclaw/package.json") as { version?: string };
+    return pkg.version;
+  } catch {
+    return undefined;
+  }
+})();
 
 type ServiceCtx = {
   internalDiagnostics?: {
@@ -63,6 +81,17 @@ export interface BraintrustOtelConfig {
     raw?: boolean;
     hash?: boolean;
     hashSaltSecretRef?: string;
+  };
+  // Versioning labels travel on every span as top-level
+  // `braintrust.metadata.*` so dataset examples promoted from real
+  // traces carry them automatically. Schema validation lands in THE-47;
+  // this shape is read leniently here so an operator can start setting
+  // values before the full config schema ships.
+  versioning?: {
+    agentPromptVersion?: string;
+    toolPolicyVersion?: string;
+    runbookVersion?: string;
+    environment?: string;
   };
 }
 
@@ -124,11 +153,19 @@ export function createBraintrustOtelService(
         ? (process.env[sessIds.hashSaltSecretRef] ?? "")
         : (process.env.BRAINTRUST_SESSION_HASH_SALT ?? "");
 
+      const versioning: VersioningOptions = {
+        openclawVersion: OPENCLAW_VERSION,
+        agentPromptVersion: cfg.versioning?.agentPromptVersion,
+        toolPolicyVersion: cfg.versioning?.toolPolicyVersion,
+        runbookVersion: cfg.versioning?.runbookVersion,
+        environment: cfg.versioning?.environment,
+      };
       const attrOpts: CommonAttrOptions = {
         tags: cfg.tags ?? [],
         serviceName,
         sessIds: { raw: sessIds.raw, hash: sessIds.hash },
         salt,
+        versioning,
       };
 
       const exporter = new OTLPTraceExporter({
@@ -242,6 +279,9 @@ export function createBraintrustOtelService(
             if (!runId) return;
             const span = openRuns.get(runId);
             if (!span) return;
+            // Peek (non-consuming) — per-call slots remain available
+            // for model.call spans that may still close after the run.
+            applyAttrs(span, buildRunIoAttrs(ioBuffer.peekRunIo(runId)));
             if (event.type === "harness.run.error") {
               span.setStatus({
                 code: SpanStatusCode.ERROR,
@@ -313,6 +353,17 @@ export function createBraintrustOtelService(
             const span = openModelCalls.get(callId);
             if (!span) return;
             applyAttrs(span, buildModelCallCloseAttrs(event));
+            // Pop the matching call slot from the IoBuffer and merge
+            // its input_json/output_json/tools into the span. Returns
+            // empty when content capture was off or the call hit a
+            // gated hook path (raw-run, prompt-error).
+            const runId = event["runId"] as string | undefined;
+            if (runId) {
+              applyAttrs(
+                span,
+                buildModelCallIoAttrs(ioBuffer.takeCallIo(runId)),
+              );
+            }
             if (event.type === "model.call.error") {
               span.setStatus({
                 code: SpanStatusCode.ERROR,
@@ -357,6 +408,19 @@ export function createBraintrustOtelService(
             if (!entry) return;
             const { span } = entry;
             applyAttrs(span, buildToolExecutionCloseAttrs(event));
+            // Merge tool args/result captured via AgentToolResult
+            // middleware. Keyed by (runId, toolCallId); pulls and
+            // consumes from the IoBuffer.
+            const runId = event["runId"] as string | undefined;
+            const toolCallId = event["toolCallId"] as string | undefined;
+            if (runId && toolCallId) {
+              applyAttrs(
+                span,
+                buildToolExecutionIoAttrs(
+                  ioBuffer.takeToolIo(runId, toolCallId),
+                ),
+              );
+            }
             if (event.type === "tool.execution.error") {
               span.setStatus({
                 code: SpanStatusCode.ERROR,
