@@ -158,6 +158,27 @@ describe("IoBuffer — LLM I/O", () => {
     const buf = new IoBuffer();
     expect(buf.peekRunIo("nope")).toEqual({});
   });
+
+  it("peekRunIo still works after takeCallIo has consumed every paired slot", () => {
+    // Regression: model.call.completed runs takeCallIo BEFORE the run
+    // span closes. peekRunIo at run-close must still return the first
+    // input and last output even though all per-call slots have been
+    // popped. Otherwise braintrust.input / braintrust.output on the run
+    // span are silently empty in every multi-turn trace.
+    const buf = new IoBuffer();
+    buf.recordLlmInput(input("r1", "p1"));
+    buf.recordLlmOutput(output("r1", "o1"));
+    buf.recordLlmInput(input("r1", "p2"));
+    buf.recordLlmOutput(output("r1", "o2"));
+    // Consume both call slots as model.call.completed would.
+    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p1");
+    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p2");
+    expect(buf.takeCallIo("r1")).toBeUndefined();
+    // Run-level snapshots survive.
+    const peek = buf.peekRunIo("r1");
+    expect(peek.firstInput?.prompt).toBe("p1");
+    expect(peek.lastOutput?.assistantTexts).toEqual(["o2"]);
+  });
 });
 
 describe("IoBuffer — tool middleware payloads", () => {
