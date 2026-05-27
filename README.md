@@ -98,7 +98,7 @@ Mechanism: an in-memory `IoBuffer` subscribes to OpenClaw's plugin SDK hooks (`l
 ```sh
 npm install
 npm run typecheck
-npm test          # 77 unit tests covering attribute-mapping + IoBuffer lifecycle
+npm test          # 82 tests: attribute mapping, IoBuffer lifecycle, integration-shape event→span flow
 npm run build     # tsc -> dist/
 ```
 
