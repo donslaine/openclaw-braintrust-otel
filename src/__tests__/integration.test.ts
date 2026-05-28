@@ -19,7 +19,6 @@ import {
   IoBuffer,
   type LlmInputPayload,
   type LlmOutputPayload,
-  type ToolMiddlewarePayload,
 } from "../io-buffer.js";
 
 function setupHandler() {
@@ -146,14 +145,26 @@ describe("integration: full event → span flow with content capture on", () => 
       toolName: "fly.deploy.status",
       toolCallId: "tc-1",
     });
-    const toolPayload: ToolMiddlewarePayload = {
-      toolCallId: "tc-1",
-      toolName: "fly.deploy.status",
-      args: { app: "openclaw-bubba" },
-      result: { status: "running", machines: 1 },
-      isError: false,
-    };
-    ioBuffer.recordToolResult(toolPayload, runId);
+    // Mirror the production flow: before_tool_call lands first (args),
+    // after_tool_call lands second (result). The event-handler merges
+    // both via takeToolIo when tool.execution.completed closes the span.
+    ioBuffer.recordToolBefore(
+      {
+        toolCallId: "tc-1",
+        toolName: "fly.deploy.status",
+        args: { app: "openclaw-bubba" },
+      },
+      runId,
+    );
+    ioBuffer.recordToolAfter(
+      {
+        toolCallId: "tc-1",
+        result: { status: "running", machines: 1 },
+        isError: false,
+        durationMs: 150,
+      },
+      runId,
+    );
     handler.handle({
       type: "tool.execution.completed",
       ...baseEvent,

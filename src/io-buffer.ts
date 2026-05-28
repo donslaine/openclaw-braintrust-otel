@@ -55,6 +55,33 @@ export type ToolMiddlewarePayload = {
   isError?: boolean;
   threadId?: string;
   turnId?: string;
+  durationMs?: number;
+};
+
+/**
+ * Partial payload from `before_tool_call`. Records tool intent +
+ * arguments before execution. Merged with the matching
+ * `after_tool_call` payload at consume time.
+ */
+export type ToolBeforePayload = {
+  toolCallId: string;
+  toolName: string;
+  args?: unknown;
+  threadId?: string;
+  turnId?: string;
+};
+
+/**
+ * Partial payload from `after_tool_call`. Carries result + outcome
+ * after execution. Joins to the matching `before_tool_call` payload
+ * via toolCallId.
+ */
+export type ToolAfterPayload = {
+  toolCallId: string;
+  toolName?: string;
+  result?: unknown;
+  isError?: boolean;
+  durationMs?: number;
 };
 
 export type CallSlot = {
@@ -181,6 +208,65 @@ export class IoBuffer {
 
   // ---- Tool middleware payloads ----------------------------------------
 
+  /**
+   * Record an args-side tool payload from `before_tool_call`. If an
+   * `after_tool_call` payload has already landed for this toolCallId
+   * (out-of-order delivery, rare but possible), the existing record is
+   * augmented rather than overwritten.
+   */
+  recordToolBefore(
+    payload: ToolBeforePayload,
+    runId: string | undefined,
+  ): void {
+    if (!this.enabled) return;
+    if (!runId) return;
+    const buf = this.ensure(runId);
+    const existing = buf.toolCalls.get(payload.toolCallId);
+    buf.toolCalls.set(payload.toolCallId, {
+      ...existing,
+      toolCallId: payload.toolCallId,
+      // before_tool_call is authoritative on tool identity. If we
+      // optimistically stored a placeholder when an out-of-order after
+      // landed first, replace it now.
+      toolName: payload.toolName,
+      args: payload.args ?? existing?.args,
+      threadId: payload.threadId ?? existing?.threadId,
+      turnId: payload.turnId ?? existing?.turnId,
+    });
+  }
+
+  /**
+   * Record a result-side tool payload from `after_tool_call`. Joins to
+   * the matching `before_tool_call` payload by toolCallId. When no
+   * before-payload has landed yet (unusual — tool fired without prior
+   * args capture), a result-only entry is created.
+   */
+  recordToolAfter(payload: ToolAfterPayload, runId: string | undefined): void {
+    if (!this.enabled) return;
+    if (!runId) return;
+    const buf = this.ensure(runId);
+    const existing = buf.toolCalls.get(payload.toolCallId);
+    buf.toolCalls.set(payload.toolCallId, {
+      ...existing,
+      toolCallId: payload.toolCallId,
+      // Prefer the toolName from a prior before_tool_call (it's
+      // authoritative). Fall back to whatever after surfaces. Leave
+      // unset rather than substituting "unknown" — consumer code can
+      // decide how to display a missing name.
+      toolName: existing?.toolName ?? payload.toolName ?? "",
+      result: payload.result ?? existing?.result,
+      isError: payload.isError ?? existing?.isError,
+      durationMs: payload.durationMs ?? existing?.durationMs,
+    });
+  }
+
+  /**
+   * @deprecated Single-call tool recording from the legacy
+   * `AgentToolResultMiddleware` path. Kept for back-compat with
+   * existing tests; new code should use recordToolBefore +
+   * recordToolAfter to mirror the public before_tool_call /
+   * after_tool_call hooks landing separately.
+   */
   recordToolResult(
     payload: ToolMiddlewarePayload,
     runId: string | undefined,

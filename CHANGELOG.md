@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.2.1 — 2026-05-28
+
+Hotfix for activation + hook-registration issues discovered during the v0.2.0 deployment on Jeffery. The plugin was registered and reported its version, but `register()` and `service.start()` never ran on OpenClaw 2026.5.20 due to two distinct issues. Both fixed here.
+
+### Fixed
+
+- **Plugin activation at gateway startup.** OpenClaw 2026.5.20's gateway-startup planner only includes plugins that either (a) declare `manifest.activation.onCapabilities` includes `"hook"`, or (b) have an operator-side `plugins.entries.<id>.hooks.allowConversationAccess: true` config grant. v0.2.0's manifest had neither, so the plugin was loaded into the registry but skipped at gateway boot — `register()` and `service.start()` were never invoked. v0.2.1's manifest declares `activation.onCapabilities: ["hook"]` so the plugin self-qualifies for startup. Operators still need `hooks.allowConversationAccess: true` to grant `llm_input` / `llm_output` access at the per-hook level (see Operator action required, below).
+- **Hook registration API.** v0.2.0 used `api.registerHook(name, handler)` to subscribe to `llm_input` / `llm_output`. That API is for the legacy single-arg internal-hook system (`session-memory`, `command-logger`, etc.) — completely separate from the typed plugin hooks (`llm_input`, `llm_output`, `before_tool_call`, etc.). The correct API for typed hooks is `api.on(name, handler)`. v0.2.1 uses `api.on(...)` throughout. Without this fix, the hook subscriptions silently did nothing even in environments where the activation gate would have passed.
+
+### Changed
+
+- **Tool I/O capture migrated from `AgentToolResultMiddleware` to public `before_tool_call` + `after_tool_call` hooks.** `AgentToolResultMiddleware` is not in the public typed-hook documentation; `before_tool_call` (args) and `after_tool_call` (results) are. No conversation-access permission required for tool hooks. IoBuffer gains `recordToolBefore(...)` and `recordToolAfter(...)` that merge partial payloads by `toolCallId` at consume time. `recordToolResult(...)` kept for back-compat through this release.
+- **Manifest polish.** Added `name` and `description` to `openclaw.plugin.json` so they show up in `openclaw plugins list` (previously only set via `definePluginEntry` in code).
+
+### Operator action required
+
+For full eval-grade capture (the `braintrust.input_json` / `braintrust.output_json` columns Braintrust uses for dataset promotion), the operator must add a `hooks` block to the plugin entry in `openclaw.json`:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "braintrust-otel": {
+        "hooks": { "allowConversationAccess": true },
+        "config": { "captureContent": { "enabled": true }, ... }
+      }
+    }
+  }
+}
+```
+
+Without `allowConversationAccess: true`, the plugin starts and emits trace lifecycle spans, but `llm_input` / `llm_output` payloads are gated by the runtime as conversation-content access — those specific hook subscriptions get dropped. Tool I/O capture (`before_tool_call` / `after_tool_call`) does NOT require this grant.
+
+See M1 Runbook §7A and the README "Eval-grade capture" section for the full config example.
+
+### Tests
+
+- 82 → 87. New coverage for `recordToolBefore` / `recordToolAfter` merging, out-of-order arrival, before-only, after-only, and legacy `recordToolResult` back-compat. Integration test updated to exercise the two-phase tool capture flow.
+
 ## 0.2.0 — 2026-05-27
 
 Eval-readiness release. Traces become promotable to Braintrust eval datasets when `captureContent.enabled = true`. Adds versioning metadata so dataset examples carry the prompt / tool-policy / runbook / environment that produced them.
