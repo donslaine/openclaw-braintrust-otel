@@ -352,8 +352,8 @@ export class IoBuffer {
       const entry = this.openModelCallBySession.get(key);
       if (!entry) return undefined;
       // Use >= so ttlMs:0 means "no grace period" (immediate expiry
-       // on close). Otherwise ttlMs:0 with `now()===closedAt` would
-       // still return the entry on the close-time call.
+      // on close). Otherwise ttlMs:0 with `now()===closedAt` would
+      // still return the entry on the close-time call.
       if (
         entry.closedAt !== undefined &&
         this.now() - entry.closedAt >= this.ttlMs

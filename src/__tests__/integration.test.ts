@@ -279,8 +279,12 @@ describe("integration: full event → span flow with content capture on", () => 
     expect(attr(call1, "braintrust.input_json")).toBeUndefined();
     expect(attr(call1, "braintrust.output_json")).toBeUndefined();
     expect(attr(call1, "braintrust.metadata.openclaw.duration_ms")).toBe(1200);
-    expect(attr(call1, "braintrust.metadata.openclaw.request_bytes")).toBe(4096);
-    expect(attr(call1, "braintrust.metadata.openclaw.response_bytes")).toBe(256);
+    expect(attr(call1, "braintrust.metadata.openclaw.request_bytes")).toBe(
+      4096,
+    );
+    expect(attr(call1, "braintrust.metadata.openclaw.response_bytes")).toBe(
+      256,
+    );
     expect(attr(call1, "braintrust.metadata.openclaw.api")).toBe("messages");
     expect(attr(call1, "braintrust.metadata.openclaw.transport")).toBe("http");
     expect(

@@ -81,10 +81,7 @@ export type DiagnosticEventHandler = {
     ctx?: unknown,
   ) => void;
   /** Typed-hook entrypoint. Closes the `openclaw.model.call` span. */
-  onModelCallEnded: (
-    payload: ModelCallEndedHookPayload,
-    ctx?: unknown,
-  ) => void;
+  onModelCallEnded: (payload: ModelCallEndedHookPayload, ctx?: unknown) => void;
   openRuns: Map<string, Span>;
   openModelCalls: Map<string, Span>;
   openTools: Map<string, { span: Span; toolName: string }>;

@@ -316,9 +316,7 @@ describe("IoBuffer — open run span backstop (model.usage)", () => {
 
   it("returns undefined when both session ids are missing or unknown", () => {
     const buf = new IoBuffer();
-    expect(
-      buf.getOpenRunSpanForSession(undefined, undefined),
-    ).toBeUndefined();
+    expect(buf.getOpenRunSpanForSession(undefined, undefined)).toBeUndefined();
     expect(buf.getOpenRunSpanForSession("nope", "nope2")).toBeUndefined();
   });
 });
