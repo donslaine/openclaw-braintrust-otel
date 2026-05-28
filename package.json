@@ -1,6 +1,6 @@
 {
   "name": "@donslaine/openclaw-braintrust-otel",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "OpenClaw plugin: subscribes to internal diagnostics and emits Braintrust-shaped OTEL spans",
   "license": "MIT",
   "author": "donslaine",
