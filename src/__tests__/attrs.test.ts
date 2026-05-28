@@ -4,7 +4,6 @@ import {
   buildCommonAttrs,
   buildContextAssembledAttrs,
   buildModelCallCloseAttrs,
-  buildModelCallIoAttrs,
   buildModelCallStartedAttrs,
   buildModelUsageAttrs,
   buildRunAttrs,
@@ -19,7 +18,7 @@ import {
   type CommonAttrOptions,
   type DiagnosticEvent,
 } from "../attrs.js";
-import type { CallSlot, ToolMiddlewarePayload } from "../io-buffer.js";
+import type { ToolMiddlewarePayload } from "../io-buffer.js";
 
 // Cast helper: the upstream types are a discriminated union, but our pure
 // mappers take a structural `DiagnosticEvent` (string-keyed) since they
@@ -561,96 +560,11 @@ describe("buildToolExecutionCloseAttrs", () => {
   });
 });
 
-describe("buildModelCallIoAttrs", () => {
-  function inputSlot(extra: Partial<CallSlot["input"]> = {}): CallSlot {
-    return {
-      input: {
-        runId: "r1",
-        prompt: "hi",
-        systemPrompt: "you are jeffery",
-        historyMessages: [{ role: "user", content: "hello" }],
-        imagesCount: 0,
-        ...extra,
-      },
-    };
-  }
-
-  it("returns empty when slot is undefined", () => {
-    expect(buildModelCallIoAttrs(undefined)).toEqual({});
-  });
-
-  it("serializes input as JSON with systemPrompt, prompt, history", () => {
-    const out = buildModelCallIoAttrs(inputSlot());
-    expect(out["braintrust.input_json"]).toBe(
-      JSON.stringify({
-        systemPrompt: "you are jeffery",
-        prompt: "hi",
-        historyMessages: [{ role: "user", content: "hello" }],
-      }),
-    );
-  });
-
-  it("emits metadata.tools when input has a non-empty tools array", () => {
-    const out = buildModelCallIoAttrs(
-      inputSlot({ tools: [{ name: "shell.exec" }] }),
-    );
-    expect(out["braintrust.metadata.tools"]).toBe(
-      JSON.stringify([{ name: "shell.exec" }]),
-    );
-  });
-
-  it("omits metadata.tools when tools is empty or absent", () => {
-    expect(
-      buildModelCallIoAttrs(inputSlot())["braintrust.metadata.tools"],
-    ).toBeUndefined();
-    expect(
-      buildModelCallIoAttrs(inputSlot({ tools: [] }))[
-        "braintrust.metadata.tools"
-      ],
-    ).toBeUndefined();
-  });
-
-  it("serializes assistantTexts as output_json", () => {
-    const slot: CallSlot = {
-      output: {
-        runId: "r1",
-        assistantTexts: ["sure thing", "here you go"],
-      },
-    };
-    const out = buildModelCallIoAttrs(slot);
-    expect(out["braintrust.output_json"]).toBe(
-      JSON.stringify(["sure thing", "here you go"]),
-    );
-  });
-
-  it("emits resolved_ref and harness_id when output has them", () => {
-    const slot: CallSlot = {
-      output: {
-        runId: "r1",
-        assistantTexts: ["ok"],
-        resolvedRef: "anthropic/claude-sonnet-4-6",
-        harnessId: "pi",
-      },
-    };
-    const out = buildModelCallIoAttrs(slot);
-    expect(out["braintrust.metadata.openclaw.resolved_ref"]).toBe(
-      "anthropic/claude-sonnet-4-6",
-    );
-    expect(out["braintrust.metadata.openclaw.harness_id"]).toBe("pi");
-  });
-
-  it("handles input-only and output-only slots without crashing", () => {
-    const inputOnly = buildModelCallIoAttrs(inputSlot());
-    expect(inputOnly["braintrust.input_json"]).toBeDefined();
-    expect(inputOnly["braintrust.output_json"]).toBeUndefined();
-
-    const outputOnly = buildModelCallIoAttrs({
-      output: { runId: "r1", assistantTexts: ["x"] },
-    });
-    expect(outputOnly["braintrust.input_json"]).toBeUndefined();
-    expect(outputOnly["braintrust.output_json"]).toBeDefined();
-  });
-});
+// v0.3.0: per-call braintrust.input_json / output_json on model.call
+// spans was removed because llm_input / llm_output are turn-level
+// hooks (not per-call), so per-call attribution was impossible to
+// get right. Run-level braintrust.input / braintrust.output covered
+// by buildRunIoAttrs tests above.
 
 describe("buildToolExecutionIoAttrs", () => {
   function payload(

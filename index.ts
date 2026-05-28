@@ -1,4 +1,9 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import type {
+  DiagnosticEventHandler,
+  ModelCallEndedHookPayload,
+  ModelCallStartedHookPayload,
+} from "./src/event-handler.js";
 import {
   IoBuffer,
   type LlmInputPayload,
@@ -15,26 +20,37 @@ import { createBraintrustOtelService } from "./src/service.js";
 // `captureContent.enabled` config (default OFF — privacy).
 const ioBuffer = new IoBuffer({ enabled: false });
 
+// Mutable handle to the DiagnosticEventHandler. service.start() sets
+// it once the tracer is built; service.stop() clears it. Typed-hook
+// subscribers below dispatch model_call_started/ended through this
+// reference. Pre-start hook events (between register() and start())
+// are dropped silently — those are bootstrap-time and we don't yet
+// have a tracer to build spans against.
+export type RouterRef = { current: DiagnosticEventHandler | undefined };
+const routerRef: RouterRef = { current: undefined };
+
 export default definePluginEntry({
   id: "braintrust-otel",
   name: "Braintrust OTEL Exporter",
   description:
     "Subscribes to OpenClaw internal diagnostics and emits Braintrust-shaped OTEL spans.",
   register(api) {
-    api.registerService(createBraintrustOtelService({ ioBuffer }));
+    api.registerService(createBraintrustOtelService({ ioBuffer, routerRef }));
 
     // Public typed plugin hooks. Payload shapes are declared as
-    // `unknown` here and validated by the IoBuffer's typed entry
-    // points to avoid coupling to internal SDK type paths that are
-    // not re-exported from the public barrel.
+    // `unknown` here and narrowed at the dispatch site.
     //
     // llm_input + llm_output require `hooks.allowConversationAccess:
     // true` in the operator's plugin config — they're treated by the
-    // runtime as conversation-content hooks. before_tool_call and
-    // after_tool_call have no permission requirement.
+    // runtime as conversation-content hooks. before_tool_call,
+    // after_tool_call, model_call_started, and model_call_ended have
+    // no permission requirement.
     api.on("llm_input", (event: unknown, ctx: unknown) => {
       void ctx;
       try {
+        // Run-level capture only. See IoBuffer.recordLlmInput for why
+        // per-call attribution is unsafe (turn-level hook vs per-call
+        // model spans — v0.2.x N:1 bug).
         ioBuffer.recordLlmInput(event as LlmInputPayload);
       } catch (err) {
         console.warn("[braintrust-otel] llm_input handler error", err);
@@ -46,6 +62,26 @@ export default definePluginEntry({
         ioBuffer.recordLlmOutput(event as LlmOutputPayload);
       } catch (err) {
         console.warn("[braintrust-otel] llm_output handler error", err);
+      }
+    });
+    api.on("model_call_started", (event: unknown, ctx: unknown) => {
+      try {
+        routerRef.current?.onModelCallStarted(
+          event as ModelCallStartedHookPayload,
+          ctx,
+        );
+      } catch (err) {
+        console.warn("[braintrust-otel] model_call_started handler error", err);
+      }
+    });
+    api.on("model_call_ended", (event: unknown, ctx: unknown) => {
+      try {
+        routerRef.current?.onModelCallEnded(
+          event as ModelCallEndedHookPayload,
+          ctx,
+        );
+      } catch (err) {
+        console.warn("[braintrust-otel] model_call_ended handler error", err);
       }
     });
     api.on("before_tool_call", (event: unknown, ctx: unknown) => {
