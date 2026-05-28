@@ -1,7 +1,10 @@
 {
   "id": "braintrust-otel",
+  "name": "Braintrust OTEL Exporter",
+  "description": "Exports OpenClaw diagnostics and conversation hooks as Braintrust-shaped OTLP spans for observability and eval-grade trace capture.",
   "activation": {
-    "onStartup": true
+    "onStartup": true,
+    "onCapabilities": ["hook"]
   },
   "configSchema": {
     "type": "object",

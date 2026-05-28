@@ -181,8 +181,81 @@ describe("IoBuffer — LLM I/O", () => {
   });
 });
 
-describe("IoBuffer — tool middleware payloads", () => {
-  it("records and consumes a tool payload by toolCallId", () => {
+describe("IoBuffer — tool payloads (two-phase: before + after)", () => {
+  it("merges before_tool_call + after_tool_call by toolCallId", () => {
+    const buf = new IoBuffer();
+    buf.recordToolBefore(
+      { toolCallId: "call-1", toolName: "exec", args: { cmd: "ls" } },
+      "r1",
+    );
+    buf.recordToolAfter(
+      { toolCallId: "call-1", result: "ok", isError: false, durationMs: 12 },
+      "r1",
+    );
+    const taken = buf.takeToolIo("r1", "call-1");
+    expect(taken?.toolName).toBe("exec");
+    expect(taken?.args).toEqual({ cmd: "ls" });
+    expect(taken?.result).toBe("ok");
+    expect(taken?.isError).toBe(false);
+    expect(taken?.durationMs).toBe(12);
+    // takeToolIo consumes — second call returns undefined.
+    expect(buf.takeToolIo("r1", "call-1")).toBeUndefined();
+  });
+
+  it("handles after_tool_call arriving before before_tool_call (out-of-order)", () => {
+    const buf = new IoBuffer();
+    buf.recordToolAfter({ toolCallId: "call-1", result: "ok" }, "r1");
+    buf.recordToolBefore(
+      { toolCallId: "call-1", toolName: "exec", args: { cmd: "ls" } },
+      "r1",
+    );
+    const taken = buf.takeToolIo("r1", "call-1");
+    expect(taken?.toolName).toBe("exec");
+    expect(taken?.args).toEqual({ cmd: "ls" });
+    expect(taken?.result).toBe("ok");
+  });
+
+  it("handles after-only (before missed) — result-only entry surfaces", () => {
+    const buf = new IoBuffer();
+    buf.recordToolAfter(
+      { toolCallId: "call-1", toolName: "exec", result: "ok", isError: false },
+      "r1",
+    );
+    const taken = buf.takeToolIo("r1", "call-1");
+    expect(taken?.toolName).toBe("exec");
+    expect(taken?.result).toBe("ok");
+    expect(taken?.args).toBeUndefined();
+  });
+
+  it("handles before-only (after missed) — args-only entry surfaces", () => {
+    const buf = new IoBuffer();
+    buf.recordToolBefore(
+      { toolCallId: "call-1", toolName: "exec", args: { cmd: "ls" } },
+      "r1",
+    );
+    const taken = buf.takeToolIo("r1", "call-1");
+    expect(taken?.toolName).toBe("exec");
+    expect(taken?.args).toEqual({ cmd: "ls" });
+    expect(taken?.result).toBeUndefined();
+  });
+
+  it("does not let an after-payload's later before-payload overwrite an existing result", () => {
+    // Edge case: if before arrives twice (replay / hook retried), we
+    // shouldn't lose the result already captured by an earlier after.
+    const buf = new IoBuffer();
+    buf.recordToolAfter({ toolCallId: "call-1", result: "first-result" }, "r1");
+    buf.recordToolBefore(
+      { toolCallId: "call-1", toolName: "exec", args: { cmd: "ls" } },
+      "r1",
+    );
+    const taken = buf.takeToolIo("r1", "call-1");
+    expect(taken?.result).toBe("first-result");
+    expect(taken?.args).toEqual({ cmd: "ls" });
+  });
+
+  it("records and consumes a tool payload via legacy recordToolResult (back-compat)", () => {
+    // recordToolResult is deprecated but kept for transitional callers;
+    // exercise the single-call path so we know it still works.
     const buf = new IoBuffer();
     buf.recordToolResult(
       tool("call-1", "exec", { args: { cmd: "ls" }, result: "ok" }),
@@ -191,7 +264,6 @@ describe("IoBuffer — tool middleware payloads", () => {
     const taken = buf.takeToolIo("r1", "call-1");
     expect(taken?.args).toEqual({ cmd: "ls" });
     expect(taken?.result).toBe("ok");
-    // takeToolIo consumes — second call returns undefined.
     expect(buf.takeToolIo("r1", "call-1")).toBeUndefined();
   });
 
