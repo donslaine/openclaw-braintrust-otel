@@ -7,7 +7,11 @@
 // keyed registry.
 //
 // Lifecycle:
-//   - LLM I/O is keyed by runId. Cleared when the run span closes.
+//   - LLM I/O is keyed by runId. firstInput/lastOutput snapshots are
+//     attached to the openclaw.run span at run-close. Per-call I/O is
+//     not captured: llm_input / llm_output are turn-level hooks and
+//     can't be reliably attributed to a single model.call (a turn may
+//     contain multiple calls).
 //   - Tool middleware payloads are keyed by (runId, toolCallId). Each is
 //     consumed once when the corresponding tool.execution span closes.
 //   - Open model.call spans are keyed by sessionKey (preferred) or
@@ -84,26 +88,16 @@ export type ToolAfterPayload = {
   durationMs?: number;
 };
 
-export type CallSlot = {
-  input?: LlmInputPayload;
-  output?: LlmOutputPayload;
-};
-
 type RunBuffer = {
-  calls: CallSlot[];
   toolCalls: Map<string, ToolMiddlewarePayload>;
-  // Run-level snapshots updated on every record. Live separately from
-  // `calls` so they survive when takeCallIo consumes individual slots
-  // (model.call.completed runs before run.completed in a typical
-  // sequence — peekRunIo at run-close needs first/last to still exist
-  // even though every paired slot has already been popped).
+  // Run-level snapshots: first prompt seen and last assistant output
+  // observed for the run. Used by buildRunIoAttrs at run-close to
+  // populate braintrust.input / braintrust.output on the run span.
   firstInput?: LlmInputPayload;
   lastOutput?: LlmOutputPayload;
 };
 
 export type IoBufferOptions = {
-  /** Max LLM call slots retained per run. Older slots are dropped on overflow. */
-  maxCallsPerRun?: number;
   /**
    * Initial enabled state. The service flips this at start() based on
    * the resolved `captureContent.enabled` config via setEnabled().
@@ -118,11 +112,9 @@ export class IoBuffer {
   private byRun = new Map<string, RunBuffer>();
   /** sessionKey || sessionId → most-recently-opened open model.call span. */
   private openModelCallBySession = new Map<string, unknown>();
-  private readonly maxCalls: number;
   private enabled: boolean;
 
   constructor(opts: IoBufferOptions = {}) {
-    this.maxCalls = Math.max(1, opts.maxCallsPerRun ?? 50);
     this.enabled = opts.enabled ?? true;
   }
 
@@ -144,58 +136,28 @@ export class IoBuffer {
   recordLlmInput(payload: LlmInputPayload): void {
     if (!this.enabled) return;
     const buf = this.ensure(payload.runId);
-    buf.calls.push({ input: payload });
+    // llm_input is a turn-level hook (fires once per turn, not per
+    // model call). Capture the first prompt for run-level
+    // braintrust.input attribution. We deliberately do not attempt to
+    // pair per-call: the openclaw runtime fires llm_input once per
+    // turn but emits N model.call.started events per turn, so any
+    // pairing is wrong by construction (v0.2.x bug).
     if (!buf.firstInput) buf.firstInput = payload;
-    this.trim(buf);
   }
 
   recordLlmOutput(payload: LlmOutputPayload): void {
     if (!this.enabled) return;
     const buf = this.ensure(payload.runId);
+    // Same shape as recordLlmInput: turn-level capture only. Last
+    // observed output wins so multi-turn runs surface the final
+    // assistant message on the run span.
     buf.lastOutput = payload;
-    // Match to the most recent call slot that has an input but no output.
-    for (let i = buf.calls.length - 1; i >= 0; i--) {
-      const slot = buf.calls[i];
-      if (slot && slot.input && !slot.output) {
-        slot.output = payload;
-        return;
-      }
-    }
-    // Output without a prior input (raw-run path or input was gated).
-    buf.calls.push({ output: payload });
-    this.trim(buf);
-  }
-
-  /**
-   * Pop the oldest paired call slot for this run. If no fully-paired slot
-   * exists, returns the oldest slot with just an input. Used by the
-   * attribute mapper when closing a model.call span.
-   */
-  takeCallIo(runId: string): CallSlot | undefined {
-    const buf = this.byRun.get(runId);
-    if (!buf || buf.calls.length === 0) return undefined;
-    for (let i = 0; i < buf.calls.length; i++) {
-      const slot = buf.calls[i];
-      if (slot && slot.input && slot.output) {
-        return buf.calls.splice(i, 1)[0];
-      }
-    }
-    for (let i = 0; i < buf.calls.length; i++) {
-      const slot = buf.calls[i];
-      if (slot && slot.input) {
-        return buf.calls.splice(i, 1)[0];
-      }
-    }
-    return buf.calls.shift();
   }
 
   /**
    * Non-consuming peek used by the run-level attribute mapper to derive
    * `braintrust.input` (first prompt) and `braintrust.output` (last
-   * assistant text) when the run span closes. Reads from the run-level
-   * snapshots, which are not affected by takeCallIo consumption — so
-   * this still returns the right values after every per-call slot has
-   * been popped at model.call.completed time.
+   * assistant text) when the run span closes.
    */
   peekRunIo(runId: string): {
     firstInput?: LlmInputPayload;
@@ -341,19 +303,15 @@ export class IoBuffer {
 
   stats(): {
     runs: number;
-    totalCalls: number;
     totalToolCalls: number;
     sessionParents: number;
   } {
-    let totalCalls = 0;
     let totalToolCalls = 0;
     for (const buf of this.byRun.values()) {
-      totalCalls += buf.calls.length;
       totalToolCalls += buf.toolCalls.size;
     }
     return {
       runs: this.byRun.size,
-      totalCalls,
       totalToolCalls,
       sessionParents: this.openModelCallBySession.size,
     };
@@ -364,15 +322,9 @@ export class IoBuffer {
   private ensure(runId: string): RunBuffer {
     let buf = this.byRun.get(runId);
     if (!buf) {
-      buf = { calls: [], toolCalls: new Map() };
+      buf = { toolCalls: new Map() };
       this.byRun.set(runId, buf);
     }
     return buf;
-  }
-
-  private trim(buf: RunBuffer): void {
-    while (buf.calls.length > this.maxCalls) {
-      buf.calls.shift();
-    }
   }
 }

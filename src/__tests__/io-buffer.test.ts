@@ -40,118 +40,34 @@ function tool(
   return { toolCallId, toolName, ...extra };
 }
 
-describe("IoBuffer — LLM I/O", () => {
-  it("records an input and returns it via takeCallIo", () => {
+describe("IoBuffer — LLM I/O (turn-level run snapshots)", () => {
+  // v0.3.0: per-call pairing dropped. llm_input / llm_output fire
+  // once per turn, not per model call, so per-call slots were
+  // impossible to attribute correctly (v0.2.x N:1 bug). We now keep
+  // only firstInput / lastOutput per run for the openclaw.run span's
+  // braintrust.input / braintrust.output.
+
+  it("captures firstInput on the first llm_input for a run", () => {
     const buf = new IoBuffer();
-    buf.recordLlmInput(input("r1", "hi"));
-    const slot = buf.takeCallIo("r1");
-    expect(slot?.input?.prompt).toBe("hi");
-    expect(slot?.output).toBeUndefined();
+    buf.recordLlmInput(input("r1", "first"));
+    buf.recordLlmInput(input("r1", "second"));
+    expect(buf.peekRunIo("r1").firstInput?.prompt).toBe("first");
   });
 
-  it("pairs an output with its preceding input", () => {
+  it("captures lastOutput on the latest llm_output for a run", () => {
     const buf = new IoBuffer();
-    buf.recordLlmInput(input("r1", "hi"));
-    buf.recordLlmOutput(output("r1", "hello"));
-    const slot = buf.takeCallIo("r1");
-    expect(slot?.input?.prompt).toBe("hi");
-    expect(slot?.output?.assistantTexts).toEqual(["hello"]);
-    // Buffer empty after consume
-    expect(buf.takeCallIo("r1")).toBeUndefined();
+    buf.recordLlmOutput(output("r1", "early"));
+    buf.recordLlmOutput(output("r1", "late"));
+    expect(buf.peekRunIo("r1").lastOutput?.assistantTexts).toEqual(["late"]);
   });
 
-  it("creates an output-only slot when output arrives with no prior input", () => {
+  it("peekRunIo is non-consuming (multiple reads return the same data)", () => {
     const buf = new IoBuffer();
-    buf.recordLlmOutput(output("r1", "hello"));
-    const slot = buf.takeCallIo("r1");
-    expect(slot?.input).toBeUndefined();
-    expect(slot?.output?.assistantTexts).toEqual(["hello"]);
-  });
-
-  it("pairs two interleaved input/output sequences correctly", () => {
-    const buf = new IoBuffer();
-    buf.recordLlmInput(input("r1", "p1"));
-    buf.recordLlmInput(input("r1", "p2"));
-    buf.recordLlmOutput(output("r1", "o2"));
-    buf.recordLlmOutput(output("r1", "o1"));
-    // recordLlmOutput matches the most-recent input without an output,
-    // so order of arrival pairs LIFO: o2 → p2, o1 → p1.
-    // takeCallIo returns oldest-paired first.
-    const first = buf.takeCallIo("r1");
-    expect(first?.input?.prompt).toBe("p1");
-    expect(first?.output?.assistantTexts).toEqual(["o1"]);
-    const second = buf.takeCallIo("r1");
-    expect(second?.input?.prompt).toBe("p2");
-    expect(second?.output?.assistantTexts).toEqual(["o2"]);
-  });
-
-  it("prefers paired slots over input-only when taking", () => {
-    const buf = new IoBuffer();
-    buf.recordLlmInput(input("r1", "p1")); // input-only, oldest
-    buf.recordLlmInput(input("r1", "p2"));
-    buf.recordLlmOutput(output("r1", "o2")); // pairs with p2
-    const slot = buf.takeCallIo("r1");
-    expect(slot?.input?.prompt).toBe("p2");
-    expect(slot?.output?.assistantTexts).toEqual(["o2"]);
-  });
-
-  it("enforces maxCallsPerRun by dropping oldest", () => {
-    const buf = new IoBuffer({ maxCallsPerRun: 2 });
-    buf.recordLlmInput(input("r1", "p1"));
-    buf.recordLlmInput(input("r1", "p2"));
-    buf.recordLlmInput(input("r1", "p3"));
-    // p1 should be evicted; only p2 and p3 remain.
-    const first = buf.takeCallIo("r1");
-    const second = buf.takeCallIo("r1");
-    expect([first?.input?.prompt, second?.input?.prompt].sort()).toEqual([
-      "p2",
-      "p3",
-    ]);
-    expect(buf.takeCallIo("r1")).toBeUndefined();
-  });
-
-  it("no-ops when constructed with enabled: false", () => {
-    const buf = new IoBuffer({ enabled: false });
-    buf.recordLlmInput(input("r1", "hi"));
-    buf.recordLlmOutput(output("r1", "hello"));
-    expect(buf.takeCallIo("r1")).toBeUndefined();
-  });
-
-  it("flips capture on/off live via setEnabled", () => {
-    const buf = new IoBuffer({ enabled: false });
-    buf.recordLlmInput(input("r1", "p1"));
-    expect(buf.isEnabled()).toBe(false);
-    expect(buf.takeCallIo("r1")).toBeUndefined();
-    buf.setEnabled(true);
-    expect(buf.isEnabled()).toBe(true);
-    buf.recordLlmInput(input("r1", "p2"));
-    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p2");
-    buf.setEnabled(false);
-    buf.recordLlmInput(input("r1", "p3"));
-    expect(buf.takeCallIo("r1")).toBeUndefined();
-  });
-
-  it("clearRun drops all state for a runId without affecting others", () => {
-    const buf = new IoBuffer();
-    buf.recordLlmInput(input("r1", "p1"));
-    buf.recordLlmInput(input("r2", "p2"));
-    buf.clearRun("r1");
-    expect(buf.takeCallIo("r1")).toBeUndefined();
-    expect(buf.takeCallIo("r2")?.input?.prompt).toBe("p2");
-  });
-
-  it("peekRunIo returns first input and last output without consuming", () => {
-    const buf = new IoBuffer();
-    buf.recordLlmInput(input("r1", "p1"));
-    buf.recordLlmOutput(output("r1", "o1"));
-    buf.recordLlmInput(input("r1", "p2"));
-    buf.recordLlmOutput(output("r1", "o2"));
-    const peek = buf.peekRunIo("r1");
-    expect(peek.firstInput?.prompt).toBe("p1");
-    expect(peek.lastOutput?.assistantTexts).toEqual(["o2"]);
-    // Peek is non-consuming: both slots still takeable.
-    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p1");
-    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p2");
+    buf.recordLlmInput(input("r1", "p"));
+    buf.recordLlmOutput(output("r1", "o"));
+    expect(buf.peekRunIo("r1").firstInput?.prompt).toBe("p");
+    expect(buf.peekRunIo("r1").firstInput?.prompt).toBe("p");
+    expect(buf.peekRunIo("r1").lastOutput?.assistantTexts).toEqual(["o"]);
   });
 
   it("peekRunIo on unknown run returns empty object", () => {
@@ -159,25 +75,32 @@ describe("IoBuffer — LLM I/O", () => {
     expect(buf.peekRunIo("nope")).toEqual({});
   });
 
-  it("peekRunIo still works after takeCallIo has consumed every paired slot", () => {
-    // Regression: model.call.completed runs takeCallIo BEFORE the run
-    // span closes. peekRunIo at run-close must still return the first
-    // input and last output even though all per-call slots have been
-    // popped. Otherwise braintrust.input / braintrust.output on the run
-    // span are silently empty in every multi-turn trace.
+  it("does not record when constructed with enabled: false", () => {
+    const buf = new IoBuffer({ enabled: false });
+    buf.recordLlmInput(input("r1", "p"));
+    buf.recordLlmOutput(output("r1", "o"));
+    expect(buf.peekRunIo("r1")).toEqual({});
+  });
+
+  it("flips capture on/off live via setEnabled", () => {
+    const buf = new IoBuffer({ enabled: false });
+    buf.recordLlmInput(input("r1", "first-disabled"));
+    expect(buf.peekRunIo("r1").firstInput).toBeUndefined();
+    buf.setEnabled(true);
+    buf.recordLlmInput(input("r1", "first-enabled"));
+    expect(buf.peekRunIo("r1").firstInput?.prompt).toBe("first-enabled");
+    buf.setEnabled(false);
+    buf.recordLlmOutput(output("r1", "ignored"));
+    expect(buf.peekRunIo("r1").lastOutput).toBeUndefined();
+  });
+
+  it("clearRun drops all state for a runId without affecting others", () => {
     const buf = new IoBuffer();
     buf.recordLlmInput(input("r1", "p1"));
-    buf.recordLlmOutput(output("r1", "o1"));
-    buf.recordLlmInput(input("r1", "p2"));
-    buf.recordLlmOutput(output("r1", "o2"));
-    // Consume both call slots as model.call.completed would.
-    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p1");
-    expect(buf.takeCallIo("r1")?.input?.prompt).toBe("p2");
-    expect(buf.takeCallIo("r1")).toBeUndefined();
-    // Run-level snapshots survive.
-    const peek = buf.peekRunIo("r1");
-    expect(peek.firstInput?.prompt).toBe("p1");
-    expect(peek.lastOutput?.assistantTexts).toEqual(["o2"]);
+    buf.recordLlmInput(input("r2", "p2"));
+    buf.clearRun("r1");
+    expect(buf.peekRunIo("r1")).toEqual({});
+    expect(buf.peekRunIo("r2").firstInput?.prompt).toBe("p2");
   });
 });
 
@@ -330,7 +253,7 @@ describe("IoBuffer — open model.call span registry (model.usage parenting)", (
 });
 
 describe("IoBuffer — stats", () => {
-  it("counts runs, paired slots, tool calls, and session parents", () => {
+  it("counts runs, tool calls, and session parents", () => {
     const buf = new IoBuffer();
     buf.recordLlmInput(input("r1", "p"));
     buf.recordLlmInput(input("r2", "p"));
@@ -338,7 +261,6 @@ describe("IoBuffer — stats", () => {
     buf.setOpenModelCallSpanForSession("sk-1", undefined, {});
     const s = buf.stats();
     expect(s.runs).toBe(2);
-    expect(s.totalCalls).toBe(2);
     expect(s.totalToolCalls).toBe(1);
     expect(s.sessionParents).toBe(1);
   });

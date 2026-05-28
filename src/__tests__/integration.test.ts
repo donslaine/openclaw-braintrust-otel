@@ -83,7 +83,7 @@ describe("integration: full event → span flow with content capture on", () => 
     // --- Run starts ---
     handler.handle({ type: "run.started", ...baseEvent, trigger: "user" });
 
-    // --- Turn 1: llm_input hook fires before model.call.started ---
+    // --- Turn 1: llm_input hook (turn-level, fires once per turn) ---
     const turn1Input: LlmInputPayload = {
       runId,
       sessionId,
@@ -97,9 +97,8 @@ describe("integration: full event → span flow with content capture on", () => 
     };
     ioBuffer.recordLlmInput(turn1Input);
 
-    // model.call lifecycle: started → completed
-    handler.handle({
-      type: "model.call.started",
+    // model.call lifecycle via typed hooks (v0.3.0+).
+    handler.onModelCallStarted({
       ...baseEvent,
       callId: "call-1",
       api: "messages",
@@ -107,7 +106,7 @@ describe("integration: full event → span flow with content capture on", () => 
       contextTokenBudget: 180_000,
     });
 
-    // llm_output for turn 1
+    // llm_output for turn 1 (turn-level)
     const turn1Output: LlmOutputPayload = {
       runId,
       sessionId,
@@ -120,14 +119,15 @@ describe("integration: full event → span flow with content capture on", () => 
     };
     ioBuffer.recordLlmOutput(turn1Output);
 
-    handler.handle({
-      type: "model.call.completed",
+    handler.onModelCallEnded({
       ...baseEvent,
       callId: "call-1",
+      outcome: "completed",
       durationMs: 1200,
       requestPayloadBytes: 4096,
       responseStreamBytes: 256,
       timeToFirstByteMs: 380,
+      upstreamRequestIdHash: "abc123",
     });
 
     // model.usage between the two calls — must parent to call-1's span
@@ -189,8 +189,7 @@ describe("integration: full event → span flow with content capture on", () => 
     };
     ioBuffer.recordLlmInput(turn2Input);
 
-    handler.handle({
-      type: "model.call.started",
+    handler.onModelCallStarted({
       ...baseEvent,
       callId: "call-2",
       api: "messages",
@@ -215,10 +214,10 @@ describe("integration: full event → span flow with content capture on", () => 
     };
     ioBuffer.recordLlmOutput(turn2Output);
 
-    handler.handle({
-      type: "model.call.completed",
+    handler.onModelCallEnded({
       ...baseEvent,
       callId: "call-2",
+      outcome: "completed",
       durationMs: 800,
       timeToFirstByteMs: 220,
     });
@@ -261,45 +260,40 @@ describe("integration: full event → span flow with content capture on", () => 
     );
 
     // ---- Model.call spans ---------------------------------------------
-    const call1 = calls.find((s) => s.attributes["braintrust.input_json"]);
+    // v0.3.0: per-call braintrust.input_json / output_json removed.
+    // Per-call data is per-call metadata only (ttfb, bytes, duration,
+    // model, etc.); LLM content lives on the run span via
+    // braintrust.input / braintrust.output. Spans are distinguished
+    // here by their close-time attrs.
+    const call1 = calls.find(
+      (s) => s.attributes["braintrust.metrics.time_to_first_token"] === 380,
+    );
     const call2 = calls.find(
-      (s) =>
-        s.attributes["braintrust.input_json"] !==
-        call1?.attributes["braintrust.input_json"],
+      (s) => s.attributes["braintrust.metrics.time_to_first_token"] === 220,
     );
     expect(call1).toBeDefined();
     expect(call2).toBeDefined();
     if (!call1 || !call2) throw new Error("unreachable");
 
     expect(attr(call1, "braintrust.span_attributes.type")).toBe("llm");
-    const call1Input = JSON.parse(
-      attr(call1, "braintrust.input_json") as string,
-    );
-    expect(call1Input.prompt).toBe(
-      "what is the deployment status of openclaw-bubba",
-    );
-    expect(call1Input.systemPrompt).toContain("you are jeffery");
-    expect(attr(call1, "braintrust.output_json")).toBe(
-      JSON.stringify(["checking now"]),
-    );
-    const tools1 = JSON.parse(
-      attr(call1, "braintrust.metadata.tools") as string,
-    );
-    expect(tools1).toEqual([
-      { name: "shell.exec" },
-      { name: "fly.deploy.status" },
-    ]);
-    expect(attr(call1, "braintrust.metrics.time_to_first_token")).toBe(380);
+    expect(attr(call1, "braintrust.input_json")).toBeUndefined();
+    expect(attr(call1, "braintrust.output_json")).toBeUndefined();
     expect(attr(call1, "braintrust.metadata.openclaw.duration_ms")).toBe(1200);
+    expect(attr(call1, "braintrust.metadata.openclaw.request_bytes")).toBe(4096);
+    expect(attr(call1, "braintrust.metadata.openclaw.response_bytes")).toBe(256);
+    expect(attr(call1, "braintrust.metadata.openclaw.api")).toBe("messages");
+    expect(attr(call1, "braintrust.metadata.openclaw.transport")).toBe("http");
+    expect(
+      attr(call1, "braintrust.metadata.openclaw.upstream_request_id_hash"),
+    ).toBe("abc123");
     expect(attr(call1, "braintrust.metadata.model")).toBe("openai/gpt-5.5");
     expect(attr(call1, "braintrust.metadata.openclaw_version")).toBe(
       "2026.5.20",
     );
 
-    expect(attr(call2, "braintrust.output_json")).toBe(
-      JSON.stringify(["openclaw-bubba is running on 1 machine"]),
-    );
-    expect(attr(call2, "braintrust.metrics.time_to_first_token")).toBe(220);
+    expect(attr(call2, "braintrust.input_json")).toBeUndefined();
+    expect(attr(call2, "braintrust.output_json")).toBeUndefined();
+    expect(attr(call2, "braintrust.metadata.openclaw.duration_ms")).toBe(800);
 
     // ---- Tool.execution span ------------------------------------------
     const t = tools[0];
@@ -345,8 +339,7 @@ describe("integration: full event → span flow with content capture on", () => 
       runId,
       agentId: "jeffery",
     });
-    handler.handle({
-      type: "model.call.started",
+    handler.onModelCallStarted({
       sessionKey,
       sessionId,
       runId,
@@ -354,12 +347,12 @@ describe("integration: full event → span flow with content capture on", () => 
       provider: "anthropic",
       model: "claude",
     });
-    handler.handle({
-      type: "model.call.completed",
+    handler.onModelCallEnded({
       sessionKey,
       sessionId,
       runId,
       callId: "c1",
+      outcome: "completed",
       durationMs: 100,
     });
     handler.handle({
@@ -429,19 +422,18 @@ describe("integration: full event → span flow with content capture on", () => 
       runId,
       assistantTexts: ["hello"],
     });
-    handler.handle({
-      type: "model.call.started",
+    handler.onModelCallStarted({
       runId,
       sessionKey: "sk-d",
       sessionId: "sid-d",
       callId: "cd",
     });
-    handler.handle({
-      type: "model.call.completed",
+    handler.onModelCallEnded({
       runId,
       sessionKey: "sk-d",
       sessionId: "sid-d",
       callId: "cd",
+      outcome: "completed",
       durationMs: 50,
     });
     handler.handle({
