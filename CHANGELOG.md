@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.0 — 2026-05-28
+
+Fixes a structural attribution bug in v0.2.x and a long-standing parenting bug in `model.usage`. Both diagnosed via a static read of openclaw `main` (e205888fa7) — see THE-54.
+
+### Fixed
+
+- **Per-call LLM I/O was a category error.** v0.2.x attached `braintrust.input_json` / `braintrust.output_json` to `openclaw.model.call` spans, sourced from `llm_input` / `llm_output` typed hooks paired by "next open slot per runId." But those hooks are **turn-level**: they fire once per turn while `model.call.*` lifecycle events fire once per model call (a turn can contain main + compaction + tool-result-shortcut + retry calls). On every multi-call turn, N-1 of the N model.call spans landed with empty content. Live traces showed turn-1 call-A with input but call-B with nothing. v0.3.0 removes the per-call attributes entirely; LLM content lives only on the run span where the data accurately supports it.
+- **`openclaw.model.call` source migrated to typed hooks.** v0.2.x built the span from bus `model.call.started`/`completed`/`error` events. v0.3.0 builds it from the per-call typed hooks `model_call_started` / `model_call_ended` (`src/plugins/hook-types.ts:74-75, 238-266`), which carry a stable `callId` 1:1 with each model call. Bus `model.call.*` events are now ignored.
+- **`model.usage` parenting (three compounding bugs).** Production traces consistently showed `parents: []` on usage spans despite the v0.2.x session registry workaround. Root causes:
+  1. **Race.** `model_call_ended` cleared the registry synchronously; `model.usage` arrived asynchronously through the bus. Trailing usage always found an empty registry.
+  2. **Key mismatch.** Usage events inconsistently populate `sessionKey` vs `sessionId`. Registry was indexed under one; lookup by the other silently missed.
+  3. **No fallback when the call never opened.** Some usage events arrive outside any model.call window (e.g., aggregate-only emission paths).
+  Fixes: 5 s post-close TTL on registry entries, dual-key indexing under both `sessionKey` and `sessionId`, and a new `openRunBySession` backstop populated on `run.started` so usage parents to the run when no model.call match exists. The fully-orphan case should now be rare.
+
+### Changed
+
+- **IoBuffer** drops the per-call `CallSlot` machinery (`takeCallIo`, `maxCallsPerRun`, paired-slot logic, `buildModelCallIoAttrs`). Run-level `firstInput` / `lastOutput` snapshots retained for run-span attribution. Tool I/O merging by `toolCallId` unchanged.
+- **IoBuffer constructor** accepts `openModelCallTtlMs` (default 5000) and `now` (clock injection) for testable TTL behavior.
+- **Plugin entry** registers `model_call_started` and `model_call_ended` hooks via `api.on(...)` and dispatches them through a `routerRef` the service populates at `start()` and clears at `stop()`.
+
+### Migration from 0.2.x
+
+- **Span shape change.** `braintrust.input_json` / `braintrust.output_json` no longer appear on `openclaw.model.call` spans. The data wasn't real at that granularity. Run-level `braintrust.input` / `braintrust.output` (on `openclaw.run`) remain and are the canonical LLM I/O surface. Eval datasets promoting from production traces should switch to reading the run span.
+- **Config schema unchanged.** Existing `captureContent.enabled = true` configs continue to work; their effect on the run span is unchanged.
+- **`hooks.allowConversationAccess: true` still required** for run-level LLM I/O — same gate as v0.2.1.
+
+### Tests
+
+- 87 → 81. Removed per-call I/O tests and pairing tests (functions deleted). Added TTL-race, key-mismatch, and run-backstop tests for usage parenting. Integration test rewritten to drive `model_call_started` / `model_call_ended` via the hook entrypoints rather than bus events.
+
 ## 0.2.1 — 2026-05-28
 
 Hotfix for activation + hook-registration issues discovered during the v0.2.0 deployment on Jeffery. The plugin was registered and reported its version, but `register()` and `service.start()` never ran on OpenClaw 2026.5.20 due to two distinct issues. Both fixed here.

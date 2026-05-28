@@ -19,7 +19,6 @@ import {
   buildCommonAttrs,
   buildContextAssembledAttrs,
   buildModelCallCloseAttrs,
-  buildModelCallIoAttrs,
   buildModelCallStartedAttrs,
   buildModelUsageAttrs,
   buildRunAttrs,
@@ -32,6 +31,37 @@ import {
 } from "./attrs.js";
 import type { IoBuffer } from "./io-buffer.js";
 
+/**
+ * Subset of the `model_call_started` typed-hook payload we read. See
+ * openclaw `src/plugins/hook-types.ts:238-255`.
+ */
+export type ModelCallStartedHookPayload = {
+  runId?: string;
+  callId: string;
+  sessionKey?: string;
+  sessionId?: string;
+  provider?: string;
+  model?: string;
+  api?: string;
+  transport?: string;
+  contextTokenBudget?: number;
+};
+
+/**
+ * Subset of the `model_call_ended` typed-hook payload we read. See
+ * openclaw `src/plugins/hook-types.ts:257-266`.
+ */
+export type ModelCallEndedHookPayload = ModelCallStartedHookPayload & {
+  outcome?: "completed" | "error" | string;
+  durationMs?: number;
+  errorCategory?: string;
+  failureKind?: string;
+  requestPayloadBytes?: number;
+  responseStreamBytes?: number;
+  timeToFirstByteMs?: number;
+  upstreamRequestIdHash?: string;
+};
+
 export type DiagnosticEventHandlerDeps = {
   tracer: Tracer;
   attrOpts: CommonAttrOptions;
@@ -39,7 +69,19 @@ export type DiagnosticEventHandlerDeps = {
 };
 
 export type DiagnosticEventHandler = {
+  /** Bus-event entrypoint. Routed by service.ts from onInternalDiagnosticEvent. */
   handle: (event: DiagnosticEvent) => void;
+  /**
+   * Typed-hook entrypoint. Build the `openclaw.model.call` span at the
+   * start of a per-call hook event. Source of truth for model.call
+   * spans in v0.3.0+; the bus `model.call.*` events are ignored.
+   */
+  onModelCallStarted: (
+    payload: ModelCallStartedHookPayload,
+    ctx?: unknown,
+  ) => void;
+  /** Typed-hook entrypoint. Closes the `openclaw.model.call` span. */
+  onModelCallEnded: (payload: ModelCallEndedHookPayload, ctx?: unknown) => void;
   openRuns: Map<string, Span>;
   openModelCalls: Map<string, Span>;
   openTools: Map<string, { span: Span; toolName: string }>;
@@ -87,6 +129,15 @@ export function createDiagnosticEventHandler(
           attributes: buildRunAttrs(event, common),
         });
         openRuns.set(runId, span);
+        // Register the run as the model.usage backstop for this session.
+        // Used when a usage event arrives with no matching model.call
+        // (call never opened, or TTL elapsed); the span at least parents
+        // to the run instead of going fully orphan.
+        ioBuffer.setOpenRunSpanForSession(
+          event["sessionKey"] as string | undefined,
+          event["sessionId"] as string | undefined,
+          span,
+        );
         return;
       }
       case "run.completed":
@@ -96,8 +147,6 @@ export function createDiagnosticEventHandler(
         if (!runId) return;
         const span = openRuns.get(runId);
         if (!span) return;
-        // Peek (non-consuming) — per-call slots remain available
-        // for model.call spans that may still close after the run.
         applyAttrs(span, buildRunIoAttrs(ioBuffer.peekRunIo(runId)));
         if (event.type === "harness.run.error") {
           span.setStatus({
@@ -107,22 +156,33 @@ export function createDiagnosticEventHandler(
         }
         span.end();
         openRuns.delete(runId);
+        ioBuffer.clearOpenRunSpanForSession(
+          event["sessionKey"] as string | undefined,
+          event["sessionId"] as string | undefined,
+          span,
+        );
         ioBuffer.clearRun(runId);
         return;
       }
       case "model.usage": {
-        // model.usage carries no runId/callId; we parent it to the
-        // most-recently-opened model.call span for the same session,
-        // tracked in the IoBuffer. If no open call is registered
-        // (usage arrived after the call closed, or session ids are
-        // unavailable), fall back to an orphan span that groups
-        // visually in Braintrust via session_id_hash.
+        // model.usage carries no runId/callId (upstream limitation).
+        // Parent resolution, in order:
+        //   1. Most-recently-opened (or recently-closed-within-TTL)
+        //      model.call span for the same session.
+        //   2. Backstop: open openclaw.run span for the same session.
+        //   3. Fully orphan (groups visually via session_id_hash).
+        // Step 2 was added in v0.3.0 — without it, every usage event
+        // whose call had already closed went fully orphan because
+        // `model_call_ended` clears the call registry synchronously
+        // while `model.usage` arrives asynchronously through the bus.
         const sessionKey = event["sessionKey"] as string | undefined;
         const sessionId = event["sessionId"] as string | undefined;
-        const parent = ioBuffer.getOpenModelCallSpanForSession(
+        const parent = (ioBuffer.getOpenModelCallSpanForSession(
           sessionKey,
           sessionId,
-        ) as Span | undefined;
+        ) ?? ioBuffer.getOpenRunSpanForSession(sessionKey, sessionId)) as
+          | Span
+          | undefined;
         const parentCtx = parent
           ? trace.setSpan(otelContext.active(), parent)
           : otelContext.active();
@@ -146,53 +206,17 @@ export function createDiagnosticEventHandler(
         span.end();
         return;
       }
-      case "model.call.started": {
-        const callId = event["callId"] as string | undefined;
-        if (!callId || openModelCalls.has(callId)) return;
-        const runId = event["runId"] as string | undefined;
-        const span = tracer.startSpan(
-          "openclaw.model.call",
-          { attributes: buildModelCallStartedAttrs(event, common) },
-          parentCtxFromRunId(runId),
-        );
-        openModelCalls.set(callId, span);
-        ioBuffer.setOpenModelCallSpanForSession(
-          event["sessionKey"] as string | undefined,
-          event["sessionId"] as string | undefined,
-          span,
-        );
-        return;
-      }
+      // Bus `model.call.*` events are intentionally ignored in v0.3.0+.
+      // Model.call spans are built from the per-call typed hooks
+      // `model_call_started` / `model_call_ended`, which carry a stable
+      // `callId` and fire 1:1 with actual model calls (the bus events
+      // do too, but they don't pair with the turn-level `llm_input` /
+      // `llm_output` hooks, so attaching content via bus events
+      // produced N:1 pairing errors in v0.2.x).
+      case "model.call.started":
       case "model.call.completed":
-      case "model.call.error": {
-        const callId = event["callId"] as string | undefined;
-        if (!callId) return;
-        const span = openModelCalls.get(callId);
-        if (!span) return;
-        applyAttrs(span, buildModelCallCloseAttrs(event));
-        // Pop the matching call slot from the IoBuffer and merge
-        // its input_json/output_json/tools into the span. Returns
-        // empty when content capture was off or the call hit a
-        // gated hook path (raw-run, prompt-error).
-        const runId = event["runId"] as string | undefined;
-        if (runId) {
-          applyAttrs(span, buildModelCallIoAttrs(ioBuffer.takeCallIo(runId)));
-        }
-        if (event.type === "model.call.error") {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: (event["errorCategory"] as string) ?? "model.call.error",
-          });
-        }
-        span.end();
-        openModelCalls.delete(callId);
-        ioBuffer.clearOpenModelCallSpanForSession(
-          event["sessionKey"] as string | undefined,
-          event["sessionId"] as string | undefined,
-          span,
-        );
+      case "model.call.error":
         return;
-      }
       case "tool.execution.started": {
         const toolName = (event["toolName"] as string) ?? "unknown";
         const key =
@@ -253,5 +277,82 @@ export function createDiagnosticEventHandler(
     }
   }
 
-  return { handle, openRuns, openModelCalls, openTools };
+  /**
+   * Coerce a hook payload into the `DiagnosticEvent`-shaped object the
+   * attribute builders consume. The builders read fields by name with
+   * `event["field"]`, so the shape is structural — we just need the
+   * field names lined up. `type` is set to keep the close-attrs branch
+   * symmetric with the legacy bus path for tests that exercise both.
+   */
+  function payloadAsEvent(
+    payload: Record<string, unknown>,
+    type: string,
+  ): DiagnosticEvent {
+    return { type, ...payload };
+  }
+
+  function onModelCallStarted(
+    payload: ModelCallStartedHookPayload,
+    ctx?: unknown,
+  ): void {
+    void ctx;
+    const callId = payload.callId;
+    if (!callId || openModelCalls.has(callId)) return;
+    const event = payloadAsEvent(
+      payload as unknown as Record<string, unknown>,
+      "model.call.started",
+    );
+    const common = buildCommonAttrs(event, attrOpts);
+    const runId = payload.runId;
+    const span = tracer.startSpan(
+      "openclaw.model.call",
+      { attributes: buildModelCallStartedAttrs(event, common) },
+      parentCtxFromRunId(runId),
+    );
+    openModelCalls.set(callId, span);
+    ioBuffer.setOpenModelCallSpanForSession(
+      payload.sessionKey,
+      payload.sessionId,
+      span,
+    );
+  }
+
+  function onModelCallEnded(
+    payload: ModelCallEndedHookPayload,
+    ctx?: unknown,
+  ): void {
+    void ctx;
+    const callId = payload.callId;
+    if (!callId) return;
+    const span = openModelCalls.get(callId);
+    if (!span) return;
+    const isError = payload.outcome === "error";
+    const event = payloadAsEvent(
+      payload as unknown as Record<string, unknown>,
+      isError ? "model.call.error" : "model.call.completed",
+    );
+    applyAttrs(span, buildModelCallCloseAttrs(event));
+    if (isError) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: payload.errorCategory ?? "model.call.error",
+      });
+    }
+    span.end();
+    openModelCalls.delete(callId);
+    ioBuffer.clearOpenModelCallSpanForSession(
+      payload.sessionKey,
+      payload.sessionId,
+      span,
+    );
+  }
+
+  return {
+    handle,
+    onModelCallStarted,
+    onModelCallEnded,
+    openRuns,
+    openModelCalls,
+    openTools,
+  };
 }

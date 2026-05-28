@@ -5,7 +5,6 @@
 
 import { createHash } from "node:crypto";
 import type {
-  CallSlot,
   LlmInputPayload,
   LlmOutputPayload,
   ToolMiddlewarePayload,
@@ -327,6 +326,13 @@ export function buildModelCallCloseAttrs(e: DiagnosticEvent): AttrMap {
     // Top-level native metric so Braintrust's TTFT column populates.
     out["braintrust.metrics.time_to_first_token"] = ttfb;
   }
+  // upstreamRequestIdHash lives on the `model_call_ended` typed hook
+  // (not on started). Surface it at close-time so the metadata column
+  // populates regardless of which hook fired first.
+  if (typeof e["upstreamRequestIdHash"] === "string")
+    out["braintrust.metadata.openclaw.upstream_request_id_hash"] = e[
+      "upstreamRequestIdHash"
+    ] as string;
   if (e.type === "model.call.error") {
     out["braintrust.metadata.openclaw.error_category"] =
       (e["errorCategory"] as string) ?? "";
@@ -334,39 +340,6 @@ export function buildModelCallCloseAttrs(e: DiagnosticEvent): AttrMap {
       out["braintrust.metadata.openclaw.failure_kind"] = e[
         "failureKind"
       ] as string;
-  }
-  return out;
-}
-
-// I/O attributes for a closed model.call span. Reads a CallSlot popped
-// from the IoBuffer. Returns empty when the buffer didn't capture
-// either input or output (content capture disabled, or the call hit
-// the gated path that skipped one of the hooks).
-export function buildModelCallIoAttrs(slot: CallSlot | undefined): AttrMap {
-  const out: AttrMap = {};
-  if (!slot) return out;
-  if (slot.input) {
-    out["braintrust.input_json"] = JSON.stringify({
-      systemPrompt: slot.input.systemPrompt,
-      prompt: slot.input.prompt,
-      historyMessages: slot.input.historyMessages ?? [],
-    });
-    if (Array.isArray(slot.input.tools) && slot.input.tools.length > 0) {
-      out["braintrust.metadata.tools"] = JSON.stringify(slot.input.tools);
-    }
-    if (slot.input.imagesCount !== undefined) {
-      out["braintrust.metadata.openclaw.images_count"] = slot.input.imagesCount;
-    }
-  }
-  if (slot.output) {
-    out["braintrust.output_json"] = JSON.stringify(slot.output.assistantTexts);
-    if (slot.output.resolvedRef) {
-      out["braintrust.metadata.openclaw.resolved_ref"] =
-        slot.output.resolvedRef;
-    }
-    if (slot.output.harnessId) {
-      out["braintrust.metadata.openclaw.harness_id"] = slot.output.harnessId;
-    }
   }
   return out;
 }

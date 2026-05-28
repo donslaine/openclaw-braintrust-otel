@@ -30,7 +30,10 @@ import {
   type DiagnosticEvent,
   type VersioningOptions,
 } from "./attrs.js";
-import { createDiagnosticEventHandler } from "./event-handler.js";
+import {
+  createDiagnosticEventHandler,
+  type DiagnosticEventHandler,
+} from "./event-handler.js";
 import { IoBuffer } from "./io-buffer.js";
 
 // Resolved at module load. Best-effort: if openclaw isn't on the
@@ -102,12 +105,20 @@ export type BraintrustOtelServiceOptions = {
    * the resolved `captureContent.enabled` config.
    */
   ioBuffer: IoBuffer;
+  /**
+   * Mutable handle exposed to the plugin entry so its typed-hook
+   * subscribers (`model_call_started` / `model_call_ended`) can
+   * dispatch into the event handler once start() has built it. start()
+   * sets `routerRef.current`; stop() clears it. Optional for tests
+   * that drive the handler directly.
+   */
+  routerRef?: { current: DiagnosticEventHandler | undefined };
 };
 
 export function createBraintrustOtelService(
   opts: BraintrustOtelServiceOptions,
 ) {
-  const { ioBuffer } = opts;
+  const { ioBuffer, routerRef } = opts;
   let provider: BasicTracerProvider | undefined;
   let unsubscribe: (() => void) | undefined;
   // Populated in start() once the tracer is built; kept in outer scope
@@ -193,6 +204,7 @@ export function createBraintrustOtelService(
       // just gates on the trusted flag, counts, and dispatches.
       handlerRef = createDiagnosticEventHandler({ tracer, attrOpts, ioBuffer });
       const handler = handlerRef;
+      if (routerRef) routerRef.current = handler;
 
       let eventCount = 0;
       const eventCountByType = new Map<string, number>();
@@ -307,6 +319,7 @@ export function createBraintrustOtelService(
         handlerRef.openTools.clear();
         handlerRef = undefined;
       }
+      if (routerRef) routerRef.current = undefined;
       await provider?.shutdown();
       provider = undefined;
     },
