@@ -36,29 +36,36 @@ export BRAINTRUST_SESSION_HASH_SALT=$(openssl rand -hex 16)
 
 ## Plugin config
 
-All optional:
+Two sibling blocks live under `plugins.entries["braintrust-otel"]`: `hooks` (permission grants) and `config` (plugin behavior). Both optional, but **`hooks.allowConversationAccess: true` is required for `braintrust.input_json` / `braintrust.output_json` to populate**.
 
 ```json
 {
-  "endpoint": "https://api.braintrust.dev/otel",
-  "serviceName": "openclaw-myagent",
-  "tags": ["agent-myagent"],
-  "sessionIdentifiers": {
-    "raw": false,
-    "hash": true,
-    "hashSaltSecretRef": "BRAINTRUST_SESSION_HASH_SALT"
+  "hooks": {
+    "allowConversationAccess": true
   },
-  "captureContent": {
-    "enabled": false
-  },
-  "versioning": {
-    "agentPromptVersion": "jeffery-v3",
-    "toolPolicyVersion": "default-v2",
-    "runbookVersion": "m1-runbook-2026-05-26",
-    "environment": "prod"
+  "config": {
+    "endpoint": "https://api.braintrust.dev/otel",
+    "serviceName": "openclaw-myagent",
+    "tags": ["agent-myagent"],
+    "sessionIdentifiers": {
+      "raw": false,
+      "hash": true,
+      "hashSaltSecretRef": "BRAINTRUST_SESSION_HASH_SALT"
+    },
+    "captureContent": {
+      "enabled": false
+    },
+    "versioning": {
+      "agentPromptVersion": "jeffery-v3",
+      "toolPolicyVersion": "default-v2",
+      "runbookVersion": "m1-runbook-2026-05-28",
+      "environment": "prod"
+    }
   }
 }
 ```
+
+- **`hooks.allowConversationAccess`** — required to grant the plugin's `llm_input` / `llm_output` hook subscriptions at the OpenClaw runtime gate. Without this, the plugin still emits lifecycle spans (timing, tool I/O, model.usage) but `braintrust.input_json` / `braintrust.output_json` will be empty on `model.call` spans and `braintrust.input` / `braintrust.output` will be empty on `run` spans. Tool I/O hooks (`before_tool_call` / `after_tool_call`) do NOT require this grant.
 
 - **`endpoint`** — OTLP base URL (`tracesEndpoint` derives as `${endpoint}/v1/traces`). Defaults to `https://api.braintrust.dev/otel`.
 - **`serviceName`** — value sent as `service.name` resource attribute and Braintrust metadata. Defaults to `openclaw`.
@@ -78,7 +85,9 @@ All optional:
 - `braintrust.input_json` and `braintrust.output_json` on `openclaw.tool.execution` spans (tool args and result), plus `braintrust.metadata.tool_call_id` and `braintrust.metadata.is_error`.
 - `braintrust.input` and `braintrust.output` on `openclaw.run` spans, derived from the first user prompt and the last assistant response of the run.
 
-Mechanism: an in-memory `IoBuffer` subscribes to OpenClaw's plugin SDK hooks (`llm_input`, `llm_output`, `AgentToolResultMiddleware`) and joins payloads to the matching span at close time. Hooks register at plugin init but no-op until `captureContent.enabled` flips to true, so registering the plugin in a config that doesn't set the flag has the same behavior as v0.1.0.
+Mechanism: an in-memory `IoBuffer` subscribes to OpenClaw's public typed plugin hooks (`llm_input`, `llm_output`, `before_tool_call`, `after_tool_call`) via `api.on(name, handler)` and joins payloads to the matching span at close time. Tool I/O is captured in two phases (args at `before_tool_call`, result at `after_tool_call`) and merged by `toolCallId` at consume time. Hooks register at plugin init but no-op until `captureContent.enabled` flips to true, so registering the plugin in a config that doesn't set the flag has the same effective behavior as v0.1.0.
+
+**Activation requirement.** v0.2.1+ declares `activation.onCapabilities: ["hook"]` in its manifest so the plugin is automatically considered for gateway startup on OpenClaw ≥ 2026.5.20. Plugins built against older OpenClaw releases that pre-date this manifest field need to be installed against OpenClaw 2026.5.20 or newer.
 
 ### Privacy posture
 
@@ -98,7 +107,7 @@ Mechanism: an in-memory `IoBuffer` subscribes to OpenClaw's plugin SDK hooks (`l
 ```sh
 npm install
 npm run typecheck
-npm test          # 82 tests: attribute mapping, IoBuffer lifecycle, integration-shape event→span flow
+npm test          # 87 tests: attribute mapping, IoBuffer lifecycle (two-phase tool capture), integration-shape event→span flow
 npm run build     # tsc -> dist/
 ```
 
