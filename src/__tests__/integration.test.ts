@@ -386,7 +386,7 @@ describe("integration: full event → span flow with content capture on", () => 
     expect(tool.spanContext().traceId).toBe(traceId);
   });
 
-  it("falls back to orphan model.usage when no open model.call for the session", () => {
+  it("falls back to fully orphan model.usage when no open run AND no open call", () => {
     handler.handle({
       type: "model.usage",
       sessionKey: "sk-orphan",
@@ -398,8 +398,39 @@ describe("integration: full event → span flow with content capture on", () => 
     const spans = exporter.getFinishedSpans();
     const u = byName(spans, "openclaw.model.usage")[0];
     expect(u).toBeDefined();
-    // No parent → orphan span.
+    // No call AND no run for this session → fully orphan.
     expect(u.parentSpanContext).toBeUndefined();
+  });
+
+  it("parents model.usage to the run span as a backstop when no open call", () => {
+    // Production scenario: usage arrives after model_call_ended has
+    // already cleared the model.call registry AND TTL has elapsed.
+    // Previously the span went fully orphan; v0.3.0 parents it to the
+    // run span via the openRunBySession registry.
+    const sessionKey = "sk-bs";
+    const sessionId = "sid-bs";
+    const runId = "run-bs";
+    handler.handle({
+      type: "run.started",
+      sessionKey,
+      sessionId,
+      runId,
+      provider: "anthropic",
+      model: "claude",
+    });
+    // No model.call lifecycle — usage arrives orphaned from a call POV.
+    handler.handle({
+      type: "model.usage",
+      sessionKey,
+      sessionId,
+      usage: { input: 10, output: 5, total: 15 },
+    });
+    handler.handle({ type: "run.completed", sessionKey, sessionId, runId });
+
+    const spans = exporter.getFinishedSpans();
+    const run = byName(spans, "openclaw.run")[0];
+    const u = byName(spans, "openclaw.model.usage")[0];
+    expect(u.parentSpanContext?.spanId).toBe(run.spanContext().spanId);
   });
 
   it("does not capture I/O when buffer is disabled (back-compat)", () => {

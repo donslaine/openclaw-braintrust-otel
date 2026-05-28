@@ -227,8 +227,11 @@ describe("IoBuffer — open model.call span registry (model.usage parenting)", (
     ).toBeUndefined();
   });
 
-  it("clear only removes the registration when the span matches (concurrent-call guard)", () => {
-    const buf = new IoBuffer();
+  it("clear only marks the registration when the span matches (concurrent-call guard)", () => {
+    // ttlMs:0 = immediate expiry on close, so this test exercises the
+    // pure guard logic without TTL noise. The default 5000 ms TTL is
+    // covered by the dedicated TTL tests below.
+    const buf = new IoBuffer({ openModelCallTtlMs: 0 });
     const older = { id: "older" } as unknown;
     const newer = { id: "newer" } as unknown;
     buf.setOpenModelCallSpanForSession("sk-1", undefined, older);
@@ -237,11 +240,46 @@ describe("IoBuffer — open model.call span registry (model.usage parenting)", (
     // The older call closes — should NOT clobber the newer registration.
     buf.clearOpenModelCallSpanForSession("sk-1", undefined, older);
     expect(buf.getOpenModelCallSpanForSession("sk-1", undefined)).toBe(newer);
-    // Now the newer call closes — registration clears.
+    // Now the newer call closes — TTL is 0, so lookup returns undefined.
     buf.clearOpenModelCallSpanForSession("sk-1", undefined, newer);
     expect(
       buf.getOpenModelCallSpanForSession("sk-1", undefined),
     ).toBeUndefined();
+  });
+
+  it("keeps the entry findable for openModelCallTtlMs after close (race fix)", () => {
+    // The production bug v0.3.0 fixes: model.usage arrives via the
+    // diagnostic bus (async) AFTER model_call_ended (sync) has already
+    // cleared the registry, so usage spans went fully orphan. TTL
+    // keeps the entry alive across that race.
+    let now = 1000;
+    const buf = new IoBuffer({
+      openModelCallTtlMs: 5000,
+      now: () => now,
+    });
+    const span = { id: "s" } as unknown;
+    buf.setOpenModelCallSpanForSession("sk-1", "sid-1", span);
+    buf.clearOpenModelCallSpanForSession("sk-1", "sid-1", span);
+    // Within TTL: still findable.
+    now = 1000 + 4999;
+    expect(buf.getOpenModelCallSpanForSession("sk-1", undefined)).toBe(span);
+    expect(buf.getOpenModelCallSpanForSession(undefined, "sid-1")).toBe(span);
+    // Past TTL: gone.
+    now = 1000 + 5001;
+    expect(buf.getOpenModelCallSpanForSession("sk-1", "sid-1")).toBeUndefined();
+  });
+
+  it("dual-keys entries under both sessionKey and sessionId (key-mismatch fix)", () => {
+    // Production usage events sometimes carry only sessionKey,
+    // sometimes only sessionId. Writing under both keys at set-time
+    // makes the lookup robust regardless of which side the runtime
+    // populated on the usage event.
+    const buf = new IoBuffer({ openModelCallTtlMs: 0 });
+    const span = { id: "s" } as unknown;
+    buf.setOpenModelCallSpanForSession("sk-1", "sid-1", span);
+    expect(buf.getOpenModelCallSpanForSession("sk-1", undefined)).toBe(span);
+    expect(buf.getOpenModelCallSpanForSession(undefined, "sid-1")).toBe(span);
+    expect(buf.getOpenModelCallSpanForSession("sk-other", "sid-1")).toBe(span);
   });
 
   it("returns undefined when no open call is registered for the session", () => {
@@ -249,6 +287,39 @@ describe("IoBuffer — open model.call span registry (model.usage parenting)", (
     expect(
       buf.getOpenModelCallSpanForSession("sk-unknown", "sid-unknown"),
     ).toBeUndefined();
+  });
+});
+
+describe("IoBuffer — open run span backstop (model.usage)", () => {
+  // Backstop for model.usage when no matching model.call exists.
+  // Populated on run.started, cleared on run.completed. Dual-keyed
+  // under sessionKey and sessionId, same as the model.call registry.
+  it("returns the registered run span by either session id", () => {
+    const buf = new IoBuffer();
+    const runSpan = { id: "run" } as unknown;
+    buf.setOpenRunSpanForSession("sk-1", "sid-1", runSpan);
+    expect(buf.getOpenRunSpanForSession("sk-1", undefined)).toBe(runSpan);
+    expect(buf.getOpenRunSpanForSession(undefined, "sid-1")).toBe(runSpan);
+  });
+
+  it("clears only when the span matches (concurrent-run guard)", () => {
+    const buf = new IoBuffer();
+    const a = { id: "a" } as unknown;
+    const b = { id: "b" } as unknown;
+    buf.setOpenRunSpanForSession("sk-1", undefined, a);
+    buf.setOpenRunSpanForSession("sk-1", undefined, b);
+    buf.clearOpenRunSpanForSession("sk-1", undefined, a);
+    expect(buf.getOpenRunSpanForSession("sk-1", undefined)).toBe(b);
+    buf.clearOpenRunSpanForSession("sk-1", undefined, b);
+    expect(buf.getOpenRunSpanForSession("sk-1", undefined)).toBeUndefined();
+  });
+
+  it("returns undefined when both session ids are missing or unknown", () => {
+    const buf = new IoBuffer();
+    expect(
+      buf.getOpenRunSpanForSession(undefined, undefined),
+    ).toBeUndefined();
+    expect(buf.getOpenRunSpanForSession("nope", "nope2")).toBeUndefined();
   });
 });
 

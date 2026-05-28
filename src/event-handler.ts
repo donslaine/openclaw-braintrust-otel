@@ -132,6 +132,15 @@ export function createDiagnosticEventHandler(
           attributes: buildRunAttrs(event, common),
         });
         openRuns.set(runId, span);
+        // Register the run as the model.usage backstop for this session.
+        // Used when a usage event arrives with no matching model.call
+        // (call never opened, or TTL elapsed); the span at least parents
+        // to the run instead of going fully orphan.
+        ioBuffer.setOpenRunSpanForSession(
+          event["sessionKey"] as string | undefined,
+          event["sessionId"] as string | undefined,
+          span,
+        );
         return;
       }
       case "run.completed":
@@ -141,8 +150,6 @@ export function createDiagnosticEventHandler(
         if (!runId) return;
         const span = openRuns.get(runId);
         if (!span) return;
-        // Peek (non-consuming) — per-call slots remain available
-        // for model.call spans that may still close after the run.
         applyAttrs(span, buildRunIoAttrs(ioBuffer.peekRunIo(runId)));
         if (event.type === "harness.run.error") {
           span.setStatus({
@@ -152,22 +159,33 @@ export function createDiagnosticEventHandler(
         }
         span.end();
         openRuns.delete(runId);
+        ioBuffer.clearOpenRunSpanForSession(
+          event["sessionKey"] as string | undefined,
+          event["sessionId"] as string | undefined,
+          span,
+        );
         ioBuffer.clearRun(runId);
         return;
       }
       case "model.usage": {
-        // model.usage carries no runId/callId; we parent it to the
-        // most-recently-opened model.call span for the same session,
-        // tracked in the IoBuffer. If no open call is registered
-        // (usage arrived after the call closed, or session ids are
-        // unavailable), fall back to an orphan span that groups
-        // visually in Braintrust via session_id_hash.
+        // model.usage carries no runId/callId (upstream limitation).
+        // Parent resolution, in order:
+        //   1. Most-recently-opened (or recently-closed-within-TTL)
+        //      model.call span for the same session.
+        //   2. Backstop: open openclaw.run span for the same session.
+        //   3. Fully orphan (groups visually via session_id_hash).
+        // Step 2 was added in v0.3.0 — without it, every usage event
+        // whose call had already closed went fully orphan because
+        // `model_call_ended` clears the call registry synchronously
+        // while `model.usage` arrives asynchronously through the bus.
         const sessionKey = event["sessionKey"] as string | undefined;
         const sessionId = event["sessionId"] as string | undefined;
-        const parent = ioBuffer.getOpenModelCallSpanForSession(
+        const parent = (ioBuffer.getOpenModelCallSpanForSession(
           sessionKey,
           sessionId,
-        ) as Span | undefined;
+        ) ?? ioBuffer.getOpenRunSpanForSession(sessionKey, sessionId)) as
+          | Span
+          | undefined;
         const parentCtx = parent
           ? trace.setSpan(otelContext.active(), parent)
           : otelContext.active();

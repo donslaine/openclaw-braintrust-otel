@@ -106,16 +106,54 @@ export type IoBufferOptions = {
    * until config explicitly turns it on.
    */
   enabled?: boolean;
+  /**
+   * Milliseconds after `clearOpenModelCallSpanForSession` during which
+   * the entry is still findable by `getOpenModelCallSpanForSession`.
+   * Fixes the race where `model.usage` arrives after the matching
+   * `model_call_ended` has already cleared the registry — happens
+   * routinely in practice because the bus event is asynchronous and
+   * the typed hook fires synchronously. Default 5000 ms.
+   */
+  openModelCallTtlMs?: number;
+  /**
+   * Clock injection for tests. Defaults to `Date.now`. Tests can swap
+   * a controllable clock to drive the TTL behavior deterministically.
+   */
+  now?: () => number;
+};
+
+type OpenCallEntry = {
+  span: unknown;
+  // Wall-clock timestamp of the matching clearOpenModelCallSpanForSession.
+  // Undefined while the call is still open.
+  closedAt?: number;
 };
 
 export class IoBuffer {
   private byRun = new Map<string, RunBuffer>();
-  /** sessionKey || sessionId → most-recently-opened open model.call span. */
-  private openModelCallBySession = new Map<string, unknown>();
+  /**
+   * Open or recently-closed model.call entries, keyed under BOTH
+   * sessionKey and sessionId when both are present. Closed entries
+   * persist for `openModelCallTtlMs` so a trailing model.usage event
+   * still finds its parent (the typical race in production).
+   */
+  private openModelCallBySession = new Map<string, OpenCallEntry>();
+  /**
+   * Backstop registry: sessionKey / sessionId → openclaw.run span.
+   * Populated on run.started, cleared on run.completed. Used by
+   * model.usage when no matching model.call entry exists (call closed
+   * + TTL expired, or call never opened) so the usage span at least
+   * parents to the run instead of going fully orphan.
+   */
+  private openRunBySession = new Map<string, unknown>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
   private enabled: boolean;
 
   constructor(opts: IoBufferOptions = {}) {
     this.enabled = opts.enabled ?? true;
+    this.ttlMs = Math.max(0, opts.openModelCallTtlMs ?? 5000);
+    this.now = opts.now ?? Date.now;
   }
 
   /**
@@ -257,42 +295,118 @@ export class IoBuffer {
    * events for the same session look this span up via
    * `getOpenModelCallSpanForSession`.
    *
-   * Key is `sessionKey ?? sessionId`. When both calls exist concurrently
-   * for a single session (rare), the most recent overwrites the previous;
-   * the older call's usage event would be misparented. Acceptable given
-   * model.usage carries neither runId nor callId — upstream limitation.
+   * Indexed under BOTH `sessionKey` and `sessionId` when both are
+   * present — the upstream `DiagnosticUsageEvent` carries one or both
+   * (inconsistently), so dual-keying makes the lookup robust to
+   * whichever side the runtime populated. When both calls exist
+   * concurrently for a single session (rare), the most recent
+   * overwrites the previous; the older call's usage event would be
+   * misparented. Acceptable given model.usage carries neither runId
+   * nor callId — upstream limitation.
    */
   setOpenModelCallSpanForSession(
     sessionKey: string | undefined,
     sessionId: string | undefined,
     span: unknown,
   ): void {
-    const key = sessionKey ?? sessionId;
-    if (!key) return;
-    this.openModelCallBySession.set(key, span);
+    const entry: OpenCallEntry = { span };
+    if (sessionKey) this.openModelCallBySession.set(sessionKey, entry);
+    if (sessionId && sessionId !== sessionKey)
+      this.openModelCallBySession.set(sessionId, entry);
   }
 
+  /**
+   * Mark the call's registry entries as closed (TTL starts). Entries
+   * remain findable by `getOpenModelCallSpanForSession` for
+   * `openModelCallTtlMs` milliseconds so a trailing model.usage event
+   * still pairs with the just-closed call. Guards against the
+   * concurrent-call race by only marking entries whose span matches.
+   */
   clearOpenModelCallSpanForSession(
     sessionKey: string | undefined,
     sessionId: string | undefined,
     span: unknown,
   ): void {
-    const key = sessionKey ?? sessionId;
-    if (!key) return;
-    // Only clear if the span matches — guards against a newer concurrent
-    // call clobbering its own registration when an older call closes.
-    if (this.openModelCallBySession.get(key) === span) {
-      this.openModelCallBySession.delete(key);
-    }
+    const closedAt = this.now();
+    const markIfMatch = (key: string | undefined) => {
+      if (!key) return;
+      const existing = this.openModelCallBySession.get(key);
+      if (existing && existing.span === span && existing.closedAt === undefined)
+        existing.closedAt = closedAt;
+    };
+    markIfMatch(sessionKey);
+    markIfMatch(sessionId);
   }
 
+  /**
+   * Look up the open or recently-closed model.call span for a session.
+   * Tries `sessionKey` first, then `sessionId`. Returns undefined if
+   * the entry is missing or the post-close TTL has elapsed.
+   */
   getOpenModelCallSpanForSession(
     sessionKey: string | undefined,
     sessionId: string | undefined,
   ): unknown {
-    const key = sessionKey ?? sessionId;
-    if (!key) return undefined;
-    return this.openModelCallBySession.get(key);
+    const tryKey = (key: string | undefined): unknown => {
+      if (!key) return undefined;
+      const entry = this.openModelCallBySession.get(key);
+      if (!entry) return undefined;
+      // Use >= so ttlMs:0 means "no grace period" (immediate expiry
+       // on close). Otherwise ttlMs:0 with `now()===closedAt` would
+       // still return the entry on the close-time call.
+      if (
+        entry.closedAt !== undefined &&
+        this.now() - entry.closedAt >= this.ttlMs
+      )
+        return undefined;
+      return entry.span;
+    };
+    return tryKey(sessionKey) ?? tryKey(sessionId);
+  }
+
+  // ---- Open run span tracking (model.usage backstop) -------------------
+
+  /**
+   * Register the open openclaw.run span for a session. Subsequent
+   * model.usage events that find no matching model.call entry use
+   * this as a backstop parent so the span at least lands under the
+   * run instead of going fully orphan. Indexed under both sessionKey
+   * and sessionId.
+   */
+  setOpenRunSpanForSession(
+    sessionKey: string | undefined,
+    sessionId: string | undefined,
+    span: unknown,
+  ): void {
+    if (sessionKey) this.openRunBySession.set(sessionKey, span);
+    if (sessionId && sessionId !== sessionKey)
+      this.openRunBySession.set(sessionId, span);
+  }
+
+  clearOpenRunSpanForSession(
+    sessionKey: string | undefined,
+    sessionId: string | undefined,
+    span: unknown,
+  ): void {
+    if (sessionKey && this.openRunBySession.get(sessionKey) === span)
+      this.openRunBySession.delete(sessionKey);
+    if (sessionId && this.openRunBySession.get(sessionId) === span)
+      this.openRunBySession.delete(sessionId);
+  }
+
+  getOpenRunSpanForSession(
+    sessionKey: string | undefined,
+    sessionId: string | undefined,
+  ): unknown {
+    if (sessionKey) {
+      const v = this.openRunBySession.get(sessionKey);
+      if (v) return v;
+    }
+    if (sessionId) {
+      const v = this.openRunBySession.get(sessionId);
+      if (v) return v;
+    }
+    return undefined;
   }
 
   // ---- Run lifecycle ---------------------------------------------------
