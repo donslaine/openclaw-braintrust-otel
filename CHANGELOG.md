@@ -1,6 +1,27 @@
 # Changelog
 
-## 0.3.1 — 2026-05-28
+## 0.3.2 — 2026-05-29
+
+Default flip for session-identifier hashing.
+
+### Changed
+
+- **`sessionIdentifiers` defaults flipped: raw by default, hash opt-in.**
+
+  | Field | ≤ v0.3.1 default | v0.3.2 default |
+  | -- | -- | -- |
+  | `sessionKey` | hashed (`session_key_hash`) | raw (`session_key`) |
+  | `sessionId` | hashed (`session_id_hash`) | raw (`session_id`) |
+  | `runId` | hashed (`run_id_hash`) | raw (`run_id`) |
+
+  `sessionId` and `runId` are openclaw-internal opaque UUIDs with no identifying content — hashing them added trace ↔ container-log correlation friction with no real protection. `sessionKey` carries channel-native PII (Telegram chat IDs, phone numbers, Discord user IDs) and SHOULD be hashed on client-facing deployments; for internal/admin-only Braintrust (e.g. Jeffery) raw is acceptable and easier to work with. Set `sessionIdentifiers.hash: true` (and configure `BRAINTRUST_SESSION_HASH_SALT`) to restore the prior hashing behavior.
+
+### Migration impact
+
+- Existing Braintrust dashboards / saved queries filtering on `braintrust.metadata.openclaw.session_id_hash`, `session_key_hash`, or `run_id_hash` will return nothing for new traces. Switch filters to `session_id`, `session_key`, `run_id`. Previous trace history retains the hashed columns; the cutover is forward-only.
+- Client-facing deployments must explicitly set `sessionIdentifiers: { raw: false, hash: true }` and configure the salt secret. Do not upgrade to v0.3.2 on a client-facing gateway without that config change.
+
+## 0.3.1 — 2026-05-29
 
 Hotfix for tool-I/O capture, broken since v0.2.1.
 
