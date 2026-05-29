@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 — 2026-05-28
+
+Hotfix for tool-I/O capture, broken since v0.2.1.
+
+### Fixed
+
+- **`before_tool_call` / `after_tool_call` handlers read `runId` from the wrong place.** Per the openclaw hook contract (`src/plugins/hook-types.ts:450-471, 500-508`), `runId` lives on the payload, not the ctx. v0.2.1 and v0.3.0 read `ctx.runId` only — always undefined — so every tool I/O payload was silently dropped at the IoBuffer's `if (!runId) return` guard, and every `openclaw.tool.execution` span landed without `braintrust.input_json` / `braintrust.output_json` despite `captureContent.enabled = true`. v0.3.1 reads `payload.runId` first, falls back to `ctx.runId`. Extracted as `resolveHookRunId` with regression-test coverage.
+
 ## 0.3.0 — 2026-05-28
 
 Fixes a structural attribution bug in v0.2.x and a long-standing parenting bug in `model.usage`. Both diagnosed via a static read of openclaw `main` (e205888fa7) — see THE-54.
