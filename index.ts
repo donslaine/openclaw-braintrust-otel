@@ -20,6 +20,23 @@ import { createBraintrustOtelService } from "./src/service.js";
 // `captureContent.enabled` config (default OFF — privacy).
 const ioBuffer = new IoBuffer({ enabled: false });
 
+/**
+ * Resolve `runId` from a typed-hook event + ctx pair. Per the openclaw
+ * hook contract (`src/plugins/hook-types.ts`), `runId` lives on the
+ * payload, not the ctx. v0.2.1 / v0.3.0 read `ctx.runId` only for the
+ * tool hooks — always undefined — and silently dropped every tool I/O
+ * payload at the IoBuffer's `if (!runId) return` guard. Exported so
+ * regression tests can assert the precedence.
+ */
+export function resolveHookRunId(
+  event: unknown,
+  ctx: unknown,
+): string | undefined {
+  const fromEvent = (event as { runId?: string } | undefined)?.runId;
+  if (fromEvent) return fromEvent;
+  return (ctx as { runId?: string } | undefined)?.runId;
+}
+
 // Mutable handle to the DiagnosticEventHandler. service.start() sets
 // it once the tracer is built; service.stop() clears it. Typed-hook
 // subscribers below dispatch model_call_started/ended through this
@@ -86,12 +103,11 @@ export default definePluginEntry({
     });
     api.on("before_tool_call", (event: unknown, ctx: unknown) => {
       try {
-        // ctx exposes runId per the public hook contract; payload carries
-        // toolCallId, toolName, and parameters (args).
-        const runId = (ctx as { runId?: string } | undefined)?.runId;
         const payload = event as ToolBeforePayload & {
           parameters?: unknown;
+          runId?: string;
         };
+        const runId = resolveHookRunId(event, ctx);
         ioBuffer.recordToolBefore(
           {
             toolCallId: payload.toolCallId,
@@ -110,10 +126,11 @@ export default definePluginEntry({
     });
     api.on("after_tool_call", (event: unknown, ctx: unknown) => {
       try {
-        const runId = (ctx as { runId?: string } | undefined)?.runId;
         const payload = event as ToolAfterPayload & {
           error?: unknown;
+          runId?: string;
         };
+        const runId = resolveHookRunId(event, ctx);
         ioBuffer.recordToolAfter(
           {
             toolCallId: payload.toolCallId,
