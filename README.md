@@ -6,7 +6,7 @@ Gives you per-run, per-model-call, per-tool, per-turn observability for any [Ope
 
 ## What you get
 
-Five span types, all carrying `braintrust.tags`, `braintrust.metadata.service_name`, and hashed session identifiers so any span is filterable by tag or service in Braintrust:
+Five span types, all carrying `braintrust.tags`, `braintrust.metadata.service_name`, and session identifiers (raw by default, hashable for client-facing deployments) so any span is filterable by tag, service, or session in Braintrust:
 
 | Span                         | Source events                                                  | Highlights                                                                                                                                                                                                   |
 | ---------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -48,8 +48,8 @@ Two sibling blocks live under `plugins.entries["braintrust-otel"]`: `hooks` (per
     "serviceName": "openclaw-myagent",
     "tags": ["agent-myagent"],
     "sessionIdentifiers": {
-      "raw": false,
-      "hash": true,
+      "raw": true,
+      "hash": false,
       "hashSaltSecretRef": "BRAINTRUST_SESSION_HASH_SALT"
     },
     "captureContent": {
@@ -70,9 +70,9 @@ Two sibling blocks live under `plugins.entries["braintrust-otel"]`: `hooks` (per
 - **`endpoint`** — OTLP base URL (`tracesEndpoint` derives as `${endpoint}/v1/traces`). Defaults to `https://api.braintrust.dev/otel`.
 - **`serviceName`** — value sent as `service.name` resource attribute and Braintrust metadata. Defaults to `openclaw`.
 - **`tags`** — array of strings written to `braintrust.tags` on every span. Filterable in the Braintrust UI.
-- **`sessionIdentifiers.raw`** — when true, emits raw `sessionKey`/`sessionId`/`runId`. Off by default. Only safe if your session keys are not sensitive (e.g. cron names, not phone numbers or account ids).
-- **`sessionIdentifiers.hash`** — when true (default), emits SHA-256(salt + id) truncated to 16 hex chars.
-- **`sessionIdentifiers.hashSaltSecretRef`** — name of the env var holding the salt. Defaults to `BRAINTRUST_SESSION_HASH_SALT`.
+- **`sessionIdentifiers.raw`** — emits raw `sessionKey` / `sessionId` / `runId`. **Default true** (v0.3.1+). `sessionId` and `runId` are openclaw-internal UUIDs with no identifying content. `sessionKey` is the channel-native identifier (Telegram chat IDs, phone numbers, Discord user IDs) and IS PII — set to `false` for client-facing deployments and enable `hash` instead.
+- **`sessionIdentifiers.hash`** — emits SHA-256(salt + id) truncated to 16 hex chars under `*_hash` keys. **Default false** (v0.3.1+). Both `raw` and `hash` can be true simultaneously. Required for client-facing deployments where `sessionKey` PII can't land in Braintrust raw.
+- **`sessionIdentifiers.hashSaltSecretRef`** — name of the env var holding the salt. Defaults to `BRAINTRUST_SESSION_HASH_SALT`. Only used when `hash` is true.
 - **`captureContent.enabled`** — when true, exports raw LLM prompts, assistant outputs, tool args, and tool results. **Default false.** See [Eval-grade capture](#eval-grade-capture) for the privacy posture before enabling.
 - **`versioning.*`** — operator labels that travel on every span as top-level `braintrust.metadata.*`. Promoted dataset examples carry them automatically, so experiments can slice regressions by prompt/policy/runbook/environment. `openclaw_version` is added automatically from the resolved openclaw package; the four below are operator-supplied.
 
@@ -95,12 +95,12 @@ Mechanism: an in-memory `IoBuffer` subscribes to OpenClaw's public typed plugin 
 - When enabled, the plugin exfiltrates raw user prompts, assistant outputs, tool args, and tool results to the configured Braintrust endpoint.
 - This is acceptable **only** when the destination Braintrust instance is internal/admin-only and approved for that data.
 - For client-facing or externally shared deployments: do **not** enable `captureContent` without an explicit per-deployment privacy review. The plugin logs a loud warning at startup whenever the flag is on so accidental enablement is hard to miss.
-- Session identifiers remain hashed by default regardless of `captureContent`. Raw ids are still a separate opt-in via `sessionIdentifiers.raw`.
+- Session identifiers are raw by default as of v0.3.1. Set `sessionIdentifiers.hash = true` (and configure the salt) for client-facing deployments where `sessionKey` carries PII.
 
 ## Known limitations
 
 - **Trust gate inconsistency.** Upstream openclaw allowlists only `diagnostics-otel` and `diagnostics-prometheus` to receive `ctx.internalDiagnostics`. However, `onInternalDiagnosticEvent` is publicly exported from `openclaw/plugin-sdk/diagnostic-runtime`, so any plugin can subscribe regardless. This plugin prefers the host-granted `ctx.internalDiagnostics` path when available and falls back to the public SDK export otherwise. The startup log records which path is active (`subscriptionSource: "ctx" | "sdk"`). The bus is still load-bearing because `run.*`, `model.usage`, `context.assembled`, and `tool.execution.blocked` have no typed-hook equivalents.
-- **`model.usage` parenting is best-effort.** `DiagnosticUsageEvent` carries `sessionKey`/`sessionId` but not `runId` or `callId`. v0.3.0 parents the usage span via, in order: (1) the matching `model.call` span via a dual-keyed session registry with a 5 s post-close TTL across the bus/hook race, (2) the open `run` span via a backstop registry as a fallback, (3) fully orphan when neither is available (groups visually via `session_id_hash`). In practice fully orphan should be rare; the run-backstop catches the case where a usage event arrives outside any model.call window.
+- **`model.usage` parenting is best-effort.** `DiagnosticUsageEvent` carries `sessionKey`/`sessionId` but not `runId` or `callId`. v0.3.0 parents the usage span via, in order: (1) the matching `model.call` span via a dual-keyed session registry with a 5 s post-close TTL across the bus/hook race, (2) the open `run` span via a backstop registry as a fallback, (3) fully orphan when neither is available (groups visually via `session_id` metadata). In practice fully orphan should be rare; the run-backstop catches the case where a usage event arrives outside any model.call window.
 
 ## Development
 
