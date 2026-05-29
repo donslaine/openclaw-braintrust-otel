@@ -32,7 +32,11 @@ function setupHandler() {
   const attrOpts: CommonAttrOptions = {
     tags: ["agent-jeffery"],
     serviceName: "openclaw-jeffery",
-    sessIds: { raw: false, hash: true },
+    // v0.3.1+ defaults: raw true / hash false. Exercise the new
+    // default shape here so the integration test catches regressions
+    // in the run_id / session_id / session_key columns Braintrust UIs
+    // will be reading after the cutover.
+    sessIds: { raw: true, hash: false },
     salt: "test-salt",
     versioning: {
       openclawVersion: "2026.5.20",
@@ -255,9 +259,13 @@ describe("integration: full event → span flow with content capture on", () => 
     expect(attr(r, "braintrust.metadata.provider")).toBe("openrouter");
     expect(attr(r, "braintrust.metadata.agent_id")).toBe("jeffery");
     expect(attr(r, "braintrust.metadata.channel")).toBe("telegram");
-    expect(attr(r, "braintrust.metadata.openclaw.run_id_hash")).toMatch(
-      /^[0-9a-f]{16}$/,
+    expect(attr(r, "braintrust.metadata.openclaw.run_id")).toBe(runId);
+    expect(attr(r, "braintrust.metadata.openclaw.session_id")).toBe(sessionId);
+    expect(attr(r, "braintrust.metadata.openclaw.session_key")).toBe(
+      sessionKey,
     );
+    // Hashes are not emitted under the default (raw-only) shape.
+    expect(attr(r, "braintrust.metadata.openclaw.run_id_hash")).toBeUndefined();
 
     // ---- Model.call spans ---------------------------------------------
     // v0.3.0: per-call braintrust.input_json / output_json removed.

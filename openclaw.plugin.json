@@ -18,9 +18,18 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "raw": { "type": "boolean" },
-          "hash": { "type": "boolean" },
-          "hashSaltSecretRef": { "type": "string" }
+          "raw": {
+            "type": "boolean",
+            "description": "Emit sessionKey/sessionId/runId as raw values. Default true (v0.3.1+)."
+          },
+          "hash": {
+            "type": "boolean",
+            "description": "Emit sessionKey/sessionId/runId as SHA-256(salt + id) truncated to 16 hex chars. Default false (v0.3.1+). Set true for client-facing deployments where sessionKey carries PII."
+          },
+          "hashSaltSecretRef": {
+            "type": "string",
+            "description": "Env var name holding the salt used when hash is true. Defaults to BRAINTRUST_SESSION_HASH_SALT."
+          }
         }
       },
       "captureContent": {

@@ -65,6 +65,20 @@ export interface BraintrustOtelConfig {
   tracesEndpoint?: string;
   serviceName?: string;
   tags?: string[];
+  /**
+   * How session identifiers (`sessionKey`, `sessionId`, `runId`) are
+   * emitted on every span.
+   *
+   * Defaults (v0.3.1+): `raw: true`, `hash: false`. Both flags are
+   * independent and can be true simultaneously (emits both the raw
+   * value and the `*_hash` column).
+   *
+   * Set `hash: true` and provide a salt via `hashSaltSecretRef`
+   * (default env var `BRAINTRUST_SESSION_HASH_SALT`) when
+   * `sessionKey` carries channel-native PII (Telegram chat IDs,
+   * phone numbers, Discord user IDs) and the destination Braintrust
+   * is not internal/admin-only.
+   */
   sessionIdentifiers?: {
     raw?: boolean;
     hash?: boolean;
@@ -151,9 +165,17 @@ export function createBraintrustOtelService(
       const endpoint = cfg.endpoint ?? DEFAULT_ENDPOINT;
       const tracesEndpoint = cfg.tracesEndpoint ?? `${endpoint}/v1/traces`;
       const serviceName = cfg.serviceName ?? "openclaw";
+      // v0.3.1: defaults flipped. Session identifiers emit RAW by
+      // default. Hashing remains available as an opt-in for
+      // client-facing deployments where `sessionKey` carries PII
+      // (Telegram chat IDs, phone numbers, Discord user IDs). For
+      // internal/admin-only Braintrust (Jeffery), raw is the right
+      // default — hashing made trace ↔ container-log correlation
+      // require reproducing the per-VPS salt and gave no real
+      // protection on the UUID identifiers (`sessionId`, `runId`).
       const sessIds = {
-        raw: false,
-        hash: true,
+        raw: true,
+        hash: false,
         ...(cfg.sessionIdentifiers ?? {}),
       };
       const salt = sessIds.hashSaltSecretRef
