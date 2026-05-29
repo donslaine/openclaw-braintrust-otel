@@ -1,29 +1,33 @@
 # Changelog
 
-## 0.3.1 — 2026-05-29
+## 0.3.2 — 2026-05-29
 
-Hotfix for tool-I/O capture (broken since v0.2.1) plus a default flip for session-identifier hashing.
-
-### Fixed
-
-- **`before_tool_call` / `after_tool_call` handlers read `runId` from the wrong place.** Per the openclaw hook contract (`src/plugins/hook-types.ts:450-471, 500-508`), `runId` lives on the payload, not the ctx. v0.2.1 and v0.3.0 read `ctx.runId` only — always undefined — so every tool I/O payload was silently dropped at the IoBuffer's `if (!runId) return` guard, and every `openclaw.tool.execution` span landed without `braintrust.input_json` / `braintrust.output_json` despite `captureContent.enabled = true`. v0.3.1 reads `payload.runId` first, falls back to `ctx.runId`. Extracted as `resolveHookRunId` with regression-test coverage.
+Default flip for session-identifier hashing.
 
 ### Changed
 
 - **`sessionIdentifiers` defaults flipped: raw by default, hash opt-in.**
 
-  | Field | v0.3.0 default | v0.3.1 default |
+  | Field | ≤ v0.3.1 default | v0.3.2 default |
   | -- | -- | -- |
   | `sessionKey` | hashed (`session_key_hash`) | raw (`session_key`) |
   | `sessionId` | hashed (`session_id_hash`) | raw (`session_id`) |
   | `runId` | hashed (`run_id_hash`) | raw (`run_id`) |
 
-  `sessionId` and `runId` are openclaw-internal opaque UUIDs with no identifying content — hashing them added trace ↔ container-log correlation friction with no real protection. `sessionKey` carries channel-native PII (Telegram chat IDs, phone numbers, Discord user IDs) and SHOULD be hashed on client-facing deployments; for internal/admin-only Braintrust (e.g. Jeffery) raw is acceptable and easier to work with. Set `sessionIdentifiers.hash: true` (and configure `BRAINTRUST_SESSION_HASH_SALT`) to restore the v0.3.0 hashing behavior.
+  `sessionId` and `runId` are openclaw-internal opaque UUIDs with no identifying content — hashing them added trace ↔ container-log correlation friction with no real protection. `sessionKey` carries channel-native PII (Telegram chat IDs, phone numbers, Discord user IDs) and SHOULD be hashed on client-facing deployments; for internal/admin-only Braintrust (e.g. Jeffery) raw is acceptable and easier to work with. Set `sessionIdentifiers.hash: true` (and configure `BRAINTRUST_SESSION_HASH_SALT`) to restore the prior hashing behavior.
 
 ### Migration impact
 
 - Existing Braintrust dashboards / saved queries filtering on `braintrust.metadata.openclaw.session_id_hash`, `session_key_hash`, or `run_id_hash` will return nothing for new traces. Switch filters to `session_id`, `session_key`, `run_id`. Previous trace history retains the hashed columns; the cutover is forward-only.
-- Client-facing deployments must explicitly set `sessionIdentifiers: { raw: false, hash: true }` and configure the salt secret. Do not upgrade to v0.3.1 on a client-facing gateway without that config change.
+- Client-facing deployments must explicitly set `sessionIdentifiers: { raw: false, hash: true }` and configure the salt secret. Do not upgrade to v0.3.2 on a client-facing gateway without that config change.
+
+## 0.3.1 — 2026-05-29
+
+Hotfix for tool-I/O capture, broken since v0.2.1.
+
+### Fixed
+
+- **`before_tool_call` / `after_tool_call` handlers read `runId` from the wrong place.** Per the openclaw hook contract (`src/plugins/hook-types.ts:450-471, 500-508`), `runId` lives on the payload, not the ctx. v0.2.1 and v0.3.0 read `ctx.runId` only — always undefined — so every tool I/O payload was silently dropped at the IoBuffer's `if (!runId) return` guard, and every `openclaw.tool.execution` span landed without `braintrust.input_json` / `braintrust.output_json` despite `captureContent.enabled = true`. v0.3.1 reads `payload.runId` first, falls back to `ctx.runId`. Extracted as `resolveHookRunId` with regression-test coverage.
 
 ## 0.3.0 — 2026-05-28
 
