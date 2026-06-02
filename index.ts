@@ -78,17 +78,22 @@ export default definePluginEntry({
       try {
         const payload = event as LlmOutputPayload & { lastAssistant?: unknown };
         ioBuffer.recordLlmOutput(payload);
-        // Store the raw assistant message so subsequent before_tool_call
-        // events for the same run can extract per-tool reasoning. The
-        // assistant message content contains text/thinking blocks that
-        // precede tool_use blocks — that ordering is what lets us derive
-        // "why the model called this tool".
-        if (payload.runId && payload.lastAssistant !== undefined) {
-          ioBuffer.setPendingAssistantMessage(
-            payload.runId,
-            payload.lastAssistant,
-          );
-        }
+        // NOTE: setPendingAssistantMessage is intentionally NOT called here.
+        //
+        // llm_output fires once per attempt after ALL turns complete, carrying
+        // the FINAL assistant message (text-only; no tool calls). The CLI
+        // harness constructs lastAssistant synthetically with only
+        // content: [{ type: "text" }]. Neither path surfaces the intermediate
+        // assistant messages that contain per-tool thinking blocks.
+        //
+        // extractToolRationale needs an assistant message with toolCall blocks
+        // to find the right window — that is never the case here. Calling
+        // setPendingAssistantMessage and extractToolRationale from the current
+        // hook positions is dead code.
+        //
+        // TODO: re-enable once OpenClaw fires llm_output per turn (before tool
+        // dispatch) with the full turn assistant message including thinking and
+        // tool_call blocks. Track as THE-44 follow-up.
       } catch (err) {
         console.warn("[braintrust-otel] llm_output handler error", err);
       }
@@ -120,15 +125,10 @@ export default definePluginEntry({
           runId?: string;
         };
         const runId = resolveHookRunId(event, ctx);
-        // Extract reasoning from the most-recently-stored assistant message
-        // for this run. The toolCallId is the join key: we find the toolCall
-        // block in the assistant content whose id matches, then collect the
-        // text/thinking blocks that precede it. Returns {} when captureContent
-        // is off (setPendingAssistantMessage is gated) or when no match found.
-        const reasoning =
-          runId && payload.toolCallId
-            ? ioBuffer.extractToolRationale(runId, payload.toolCallId)
-            : {};
+        // NOTE: extractToolRationale is intentionally NOT called here.
+        // See the llm_output handler comment — pendingAssistant is never
+        // populated with a tool-calling message, so the extraction always
+        // returns {}. Remove the dead spread rather than carry noise.
         ioBuffer.recordToolBefore(
           {
             toolCallId: payload.toolCallId,
@@ -138,7 +138,6 @@ export default definePluginEntry({
             args: payload.args ?? payload.parameters,
             threadId: payload.threadId,
             turnId: payload.turnId,
-            ...reasoning,
           },
           runId,
         );

@@ -258,21 +258,9 @@ export function createDiagnosticEventHandler(
         const runId = event["runId"] as string | undefined;
         const toolCallId = event["toolCallId"] as string | undefined;
         if (runId && toolCallId) {
-          const io = ioBuffer.takeToolIo(runId, toolCallId);
-          // Lazy reasoning fallback: if before_tool_call fired before
-          // llm_output (common when OpenClaw fires llm_output after
-          // dispatching tools), the reasoning fields will be absent on
-          // the IoBuffer entry. Try extracting now — pendingAssistant
-          // may have been populated by the time the bus event arrives.
-          const lazyReasoning =
-            !io?.rationale && !io?.thinking && !io?.thinkingRedacted
-              ? ioBuffer.extractToolRationale(runId, toolCallId)
-              : {};
           applyAttrs(
             span,
-            buildToolExecutionIoAttrs(
-              io ? { ...io, ...lazyReasoning } : undefined,
-            ),
+            buildToolExecutionIoAttrs(ioBuffer.takeToolIo(runId, toolCallId)),
           );
         }
         if (event.type === "tool.execution.error") {
