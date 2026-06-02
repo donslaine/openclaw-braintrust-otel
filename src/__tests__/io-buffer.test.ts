@@ -536,3 +536,147 @@ describe("IoBuffer — stats", () => {
     expect(s.sessionParents).toBe(1);
   });
 });
+
+describe("IoBuffer — session-keyed reasoning (before_message_write path)", () => {
+  function makeAssistant(blocks: Array<Record<string, unknown>>) {
+    return { role: "assistant", content: blocks };
+  }
+
+  it("extracts thinking from a session-keyed assistant message", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "thinking", thinking: "Let me think about this." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    const r = buf.extractToolRationaleForSession("sk-1", "call-1");
+    expect(r.thinking).toBe("Let me think about this.");
+    expect(r.rationale).toBeUndefined();
+    expect(r.thinkingRedacted).toBeUndefined();
+  });
+
+  it("extracts text rationale preceding a toolCall block", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "text", text: "I should check the config." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    const r = buf.extractToolRationaleForSession("sk-1", "call-1");
+    expect(r.rationale).toBe("I should check the config.");
+  });
+
+  it("extracts both thinking and text when both precede the toolCall", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "thinking", thinking: "Deep reasoning." },
+        { type: "text", text: "I will read the file." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    const r = buf.extractToolRationaleForSession("sk-1", "call-1");
+    expect(r.thinking).toBe("Deep reasoning.");
+    expect(r.rationale).toBe("I will read the file.");
+  });
+
+  it("scopes reasoning between previous toolCall and target — does not bleed across tools", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "thinking", thinking: "Reason for tool 1." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+        { type: "thinking", thinking: "Reason for tool 2." },
+        { type: "toolCall", id: "call-2", name: "Bash", arguments: {} },
+      ]),
+    );
+    const r1 = buf.extractToolRationaleForSession("sk-1", "call-1");
+    const r2 = buf.extractToolRationaleForSession("sk-1", "call-2");
+    expect(r1.thinking).toBe("Reason for tool 1.");
+    expect(r2.thinking).toBe("Reason for tool 2.");
+  });
+
+  it("returns {} when toolCallId not found", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    expect(buf.extractToolRationaleForSession("sk-1", "call-999")).toEqual({});
+  });
+
+  it("returns {} when no message stored for sessionKey", () => {
+    const buf = new IoBuffer({ enabled: true });
+    expect(buf.extractToolRationaleForSession("sk-missing", "call-1")).toEqual(
+      {},
+    );
+  });
+
+  it("ignores non-assistant messages (role !== assistant)", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession("sk-1", {
+      role: "user",
+      content: [
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ],
+    });
+    expect(buf.extractToolRationaleForSession("sk-1", "call-1")).toEqual({});
+  });
+
+  it("ignores assistant messages with no toolCall blocks", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([{ type: "text", text: "Final answer." }]),
+    );
+    // Nothing stored — message had no tool calls, so it was filtered
+    expect(buf.extractToolRationaleForSession("sk-1", "call-1")).toEqual({});
+  });
+
+  it("does not store when disabled", () => {
+    const buf = new IoBuffer({ enabled: false });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "thinking", thinking: "Deep thought." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    expect(buf.extractToolRationaleForSession("sk-1", "call-1")).toEqual({});
+  });
+
+  it("clearPendingAssistantForSession removes the entry", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "thinking", thinking: "Some thought." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    buf.clearPendingAssistantForSession("sk-1");
+    expect(buf.extractToolRationaleForSession("sk-1", "call-1")).toEqual({});
+  });
+
+  it("handles redacted thinking block", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessageForSession(
+      "sk-1",
+      makeAssistant([
+        { type: "thinking", thinking: "", redacted: true },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    const r = buf.extractToolRationaleForSession("sk-1", "call-1");
+    expect(r.thinkingRedacted).toBe(true);
+    expect(r.thinking).toBeUndefined();
+  });
+});

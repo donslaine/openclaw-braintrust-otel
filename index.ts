@@ -118,6 +118,33 @@ export default definePluginEntry({
         console.warn("[braintrust-otel] model_call_ended handler error", err);
       }
     });
+    // before_message_write fires synchronously with the full AgentMessage
+    // before it is written to the session transcript. For assistant messages
+    // that contain tool calls, we capture thinking/text blocks here — this
+    // is the only hook that delivers the full turn message (thinking +
+    // tool calls) before the tools execute. before_tool_call fires next,
+    // reads the reasoning from the session-keyed buffer, and attaches it
+    // to the IoBuffer entry so it survives to span-close.
+    //
+    // No allowConversationAccess required — before_message_write is not
+    // in CONVERSATION_HOOK_NAMES.
+    api.on("before_message_write", (event: unknown, ctx: unknown) => {
+      try {
+        const sessionKey = (ctx as { sessionKey?: string } | undefined)
+          ?.sessionKey;
+        if (!sessionKey) return;
+        const payload = event as { message?: unknown };
+        ioBuffer.setPendingAssistantMessageForSession(
+          sessionKey,
+          payload.message,
+        );
+      } catch (err) {
+        console.warn(
+          "[braintrust-otel] before_message_write handler error",
+          err,
+        );
+      }
+    });
     api.on("before_tool_call", (event: unknown, ctx: unknown) => {
       try {
         const payload = event as ToolBeforePayload & {
@@ -125,10 +152,20 @@ export default definePluginEntry({
           runId?: string;
         };
         const runId = resolveHookRunId(event, ctx);
-        // NOTE: extractToolRationale is intentionally NOT called here.
-        // See the llm_output handler comment — pendingAssistant is never
-        // populated with a tool-calling message, so the extraction always
-        // returns {}. Remove the dead spread rather than carry noise.
+        const sessionKey = (ctx as { sessionKey?: string } | undefined)
+          ?.sessionKey;
+        // Extract reasoning captured via before_message_write. The hook
+        // fires synchronously with the full assistant message (thinking +
+        // tool calls) before message persistence and before tool dispatch,
+        // so pendingAssistantBySession is already populated by the time
+        // we reach here.
+        const reasoning =
+          sessionKey && payload.toolCallId
+            ? ioBuffer.extractToolRationaleForSession(
+                sessionKey,
+                payload.toolCallId,
+              )
+            : {};
         ioBuffer.recordToolBefore(
           {
             toolCallId: payload.toolCallId,
@@ -138,6 +175,7 @@ export default definePluginEntry({
             args: payload.args ?? payload.parameters,
             threadId: payload.threadId,
             turnId: payload.turnId,
+            ...reasoning,
           },
           runId,
         );
