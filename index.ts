@@ -84,7 +84,10 @@ export default definePluginEntry({
         // precede tool_use blocks — that ordering is what lets us derive
         // "why the model called this tool".
         if (payload.runId && payload.lastAssistant !== undefined) {
-          ioBuffer.setPendingAssistantMessage(payload.runId, payload.lastAssistant);
+          ioBuffer.setPendingAssistantMessage(
+            payload.runId,
+            payload.lastAssistant,
+          );
         }
       } catch (err) {
         console.warn("[braintrust-otel] llm_output handler error", err);

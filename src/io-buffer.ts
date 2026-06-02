@@ -253,10 +253,7 @@ export class IoBuffer {
   setPendingAssistantMessage(runId: string, lastAssistant: unknown): void {
     if (!this.enabled) return;
     if (!runId) return;
-    const raw = lastAssistant as
-      | { content?: unknown[] }
-      | null
-      | undefined;
+    const raw = lastAssistant as { content?: unknown[] } | null | undefined;
     if (!raw?.content) return;
     const content: AssistantContentBlock[] = [];
     for (const block of raw.content) {
@@ -306,7 +303,9 @@ export class IoBuffer {
     const msg = buf?.pendingAssistant;
     if (!msg) return {};
     const idx = msg.content.findIndex(
-      (b) => b.type === "toolCall" && (b as AssistantToolCallBlock).id === toolCallId,
+      (b) =>
+        b.type === "toolCall" &&
+        (b as AssistantToolCallBlock).id === toolCallId,
     );
     if (idx === -1) return {};
     // Only collect blocks between the PREVIOUS toolCall (exclusive) and this

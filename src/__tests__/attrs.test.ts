@@ -423,7 +423,10 @@ describe("buildContextAssembledAttrs", () => {
 
   it("sets span_attributes.type = function (Braintrust named-logic-block type)", () => {
     const common = buildCommonAttrs({ type: "context.assembled" }, baseOpts);
-    const out = buildContextAssembledAttrs({ type: "context.assembled" }, common);
+    const out = buildContextAssembledAttrs(
+      { type: "context.assembled" },
+      common,
+    );
     expect(out["braintrust.span_attributes.type"]).toBe("function");
   });
 });
@@ -455,7 +458,10 @@ describe("buildModelCallStartedAttrs", () => {
   });
 
   it("emits gen_ai.request.model when model is present", () => {
-    const e: DiagnosticEvent = { type: "model.call.started", model: "claude-3-7-sonnet-20250219" };
+    const e: DiagnosticEvent = {
+      type: "model.call.started",
+      model: "claude-3-7-sonnet-20250219",
+    };
     const common = buildCommonAttrs(e, baseOpts);
     const out = buildModelCallStartedAttrs(e, common);
     expect(out["gen_ai.request.model"]).toBe("claude-3-7-sonnet-20250219");
@@ -580,19 +586,26 @@ describe("buildToolExecutionCloseAttrs", () => {
   });
 
   it("sets tool_success=1 and tool_blocked=0 on completed", () => {
-    const out = buildToolExecutionCloseAttrs({ type: "tool.execution.completed" });
+    const out = buildToolExecutionCloseAttrs({
+      type: "tool.execution.completed",
+    });
     expect(out["braintrust.scores.tool_success"]).toBe(1);
     expect(out["braintrust.scores.tool_blocked"]).toBe(0);
   });
 
   it("sets tool_success=0 and tool_blocked=0 on error", () => {
-    const out = buildToolExecutionCloseAttrs({ type: "tool.execution.error", errorCategory: "exec_failed" });
+    const out = buildToolExecutionCloseAttrs({
+      type: "tool.execution.error",
+      errorCategory: "exec_failed",
+    });
     expect(out["braintrust.scores.tool_success"]).toBe(0);
     expect(out["braintrust.scores.tool_blocked"]).toBe(0);
   });
 
   it("sets tool_success=0 and tool_blocked=1 on blocked", () => {
-    const out = buildToolExecutionCloseAttrs({ type: "tool.execution.blocked" });
+    const out = buildToolExecutionCloseAttrs({
+      type: "tool.execution.blocked",
+    });
     expect(out["braintrust.scores.tool_success"]).toBe(0);
     expect(out["braintrust.scores.tool_blocked"]).toBe(1);
   });

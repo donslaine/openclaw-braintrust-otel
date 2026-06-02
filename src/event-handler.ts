@@ -227,7 +227,13 @@ export function createDiagnosticEventHandler(
         const runId = event["runId"] as string | undefined;
         const span = tracer.startSpan(
           "openclaw.tool.execution",
-          { attributes: buildToolExecutionStartedAttrs(common, toolName, toolCallId) },
+          {
+            attributes: buildToolExecutionStartedAttrs(
+              common,
+              toolName,
+              toolCallId,
+            ),
+          },
           parentCtxFromRunId(runId),
         );
         openTools.set(key, { span, toolName });

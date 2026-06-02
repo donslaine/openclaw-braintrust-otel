@@ -205,7 +205,13 @@ describe("IoBuffer — tool payloads (two-phase: before + after)", () => {
   it("records identity fields (toolName, threadId, turnId) even when disabled", () => {
     const buf = new IoBuffer({ enabled: false });
     buf.recordToolBefore(
-      { toolCallId: "c1", toolName: "Bash", args: { cmd: "ls" }, threadId: "t1", turnId: "turn-1" },
+      {
+        toolCallId: "c1",
+        toolName: "Bash",
+        args: { cmd: "ls" },
+        threadId: "t1",
+        turnId: "turn-1",
+      },
       "r1",
     );
     buf.recordToolAfter(
@@ -227,7 +233,13 @@ describe("IoBuffer — tool payloads (two-phase: before + after)", () => {
   it("records content fields (args, result) when enabled", () => {
     const buf = new IoBuffer({ enabled: true });
     buf.recordToolBefore(
-      { toolCallId: "c1", toolName: "Read", args: { path: "/foo" }, threadId: "t2", turnId: "turn-2" },
+      {
+        toolCallId: "c1",
+        toolName: "Read",
+        args: { path: "/foo" },
+        threadId: "t2",
+        turnId: "turn-2",
+      },
       "r1",
     );
     buf.recordToolAfter(
@@ -282,7 +294,11 @@ describe("IoBuffer — tool reasoning (setPendingAssistantMessage + extractToolR
     buf.setPendingAssistantMessage(
       "r1",
       makeMsg([
-        { type: "thinking", thinking: "Let me think about this...", redacted: false },
+        {
+          type: "thinking",
+          thinking: "Let me think about this...",
+          redacted: false,
+        },
         { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
       ]),
     );
@@ -328,7 +344,9 @@ describe("IoBuffer — tool reasoning (setPendingAssistantMessage + extractToolR
     const buf = new IoBuffer({ enabled: true });
     buf.setPendingAssistantMessage(
       "r1",
-      makeMsg([{ type: "toolCall", id: "call-1", name: "Read", arguments: {} }]),
+      makeMsg([
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
     );
     expect(buf.extractToolRationale("r1", "call-999")).toEqual({});
   });
@@ -361,7 +379,12 @@ describe("IoBuffer — tool reasoning (setPendingAssistantMessage + extractToolR
     );
     const reasoning = buf.extractToolRationale("r1", "c1");
     buf.recordToolBefore(
-      { toolCallId: "c1", toolName: "Bash", args: { command: "ls" }, ...reasoning },
+      {
+        toolCallId: "c1",
+        toolName: "Bash",
+        args: { command: "ls" },
+        ...reasoning,
+      },
       "r1",
     );
     const payload = buf.takeToolIo("r1", "c1");
