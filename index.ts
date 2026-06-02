@@ -76,7 +76,19 @@ export default definePluginEntry({
     api.on("llm_output", (event: unknown, ctx: unknown) => {
       void ctx;
       try {
-        ioBuffer.recordLlmOutput(event as LlmOutputPayload);
+        const payload = event as LlmOutputPayload & { lastAssistant?: unknown };
+        ioBuffer.recordLlmOutput(payload);
+        // Store the raw assistant message so subsequent before_tool_call
+        // events for the same run can extract per-tool reasoning. The
+        // assistant message content contains text/thinking blocks that
+        // precede tool_use blocks — that ordering is what lets us derive
+        // "why the model called this tool".
+        if (payload.runId && payload.lastAssistant !== undefined) {
+          ioBuffer.setPendingAssistantMessage(
+            payload.runId,
+            payload.lastAssistant,
+          );
+        }
       } catch (err) {
         console.warn("[braintrust-otel] llm_output handler error", err);
       }
@@ -108,6 +120,15 @@ export default definePluginEntry({
           runId?: string;
         };
         const runId = resolveHookRunId(event, ctx);
+        // Extract reasoning from the most-recently-stored assistant message
+        // for this run. The toolCallId is the join key: we find the toolCall
+        // block in the assistant content whose id matches, then collect the
+        // text/thinking blocks that precede it. Returns {} when captureContent
+        // is off (setPendingAssistantMessage is gated) or when no match found.
+        const reasoning =
+          runId && payload.toolCallId
+            ? ioBuffer.extractToolRationale(runId, payload.toolCallId)
+            : {};
         ioBuffer.recordToolBefore(
           {
             toolCallId: payload.toolCallId,
@@ -117,6 +138,7 @@ export default definePluginEntry({
             args: payload.args ?? payload.parameters,
             threadId: payload.threadId,
             turnId: payload.turnId,
+            ...reasoning,
           },
           runId,
         );

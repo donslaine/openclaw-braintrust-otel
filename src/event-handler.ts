@@ -219,14 +219,21 @@ export function createDiagnosticEventHandler(
         return;
       case "tool.execution.started": {
         const toolName = (event["toolName"] as string) ?? "unknown";
+        const toolCallId = event["toolCallId"] as string | undefined;
         const key =
-          (event["toolCallId"] as string | undefined) ??
+          toolCallId ??
           `${event["runId"] ?? ""}:${toolName}:${event["ts"] ?? Date.now()}`;
         if (openTools.has(key)) return;
         const runId = event["runId"] as string | undefined;
         const span = tracer.startSpan(
           "openclaw.tool.execution",
-          { attributes: buildToolExecutionStartedAttrs(common, toolName) },
+          {
+            attributes: buildToolExecutionStartedAttrs(
+              common,
+              toolName,
+              toolCallId,
+            ),
+          },
           parentCtxFromRunId(runId),
         );
         openTools.set(key, { span, toolName });

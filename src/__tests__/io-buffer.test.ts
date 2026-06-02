@@ -196,10 +196,212 @@ describe("IoBuffer — tool payloads (two-phase: before + after)", () => {
     expect(buf.takeToolIo("missing", "call-1")).toBeUndefined();
   });
 
-  it("no-ops tool capture when disabled", () => {
+  it("no-ops tool capture when disabled (legacy recordToolResult path)", () => {
     const buf = new IoBuffer({ enabled: false });
     buf.recordToolResult(tool("call-1", "exec"), "r1");
     expect(buf.takeToolIo("r1", "call-1")).toBeUndefined();
+  });
+
+  it("records identity fields (toolName, threadId, turnId) even when disabled", () => {
+    const buf = new IoBuffer({ enabled: false });
+    buf.recordToolBefore(
+      {
+        toolCallId: "c1",
+        toolName: "Bash",
+        args: { cmd: "ls" },
+        threadId: "t1",
+        turnId: "turn-1",
+      },
+      "r1",
+    );
+    buf.recordToolAfter(
+      { toolCallId: "c1", result: "file.txt", isError: false, durationMs: 42 },
+      "r1",
+    );
+    const payload = buf.takeToolIo("r1", "c1");
+    // Identity fields always present
+    expect(payload?.toolName).toBe("Bash");
+    expect(payload?.threadId).toBe("t1");
+    expect(payload?.turnId).toBe("turn-1");
+    expect(payload?.isError).toBe(false);
+    expect(payload?.durationMs).toBe(42);
+    // Content fields gated — args and result should be absent
+    expect(payload?.args).toBeUndefined();
+    expect(payload?.result).toBeUndefined();
+  });
+
+  it("records content fields (args, result) when enabled", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.recordToolBefore(
+      {
+        toolCallId: "c1",
+        toolName: "Read",
+        args: { path: "/foo" },
+        threadId: "t2",
+        turnId: "turn-2",
+      },
+      "r1",
+    );
+    buf.recordToolAfter(
+      { toolCallId: "c1", result: "file content", isError: false },
+      "r1",
+    );
+    const payload = buf.takeToolIo("r1", "c1");
+    expect(payload?.args).toEqual({ path: "/foo" });
+    expect(payload?.result).toBe("file content");
+    expect(payload?.threadId).toBe("t2");
+    expect(payload?.turnId).toBe("turn-2");
+  });
+});
+
+describe("IoBuffer — tool reasoning (setPendingAssistantMessage + extractToolRationale)", () => {
+  function makeMsg(blocks: Array<Record<string, unknown>>) {
+    return { content: blocks };
+  }
+
+  it("extracts text rationale preceding a toolCall block", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "text", text: "I should read the config file first." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    const result = buf.extractToolRationale("r1", "call-1");
+    expect(result.rationale).toBe("I should read the config file first.");
+    expect(result.thinking).toBeUndefined();
+    expect(result.thinkingRedacted).toBeUndefined();
+  });
+
+  it("joins multiple text blocks with newline", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "text", text: "First thought." },
+        { type: "text", text: "Second thought." },
+        { type: "toolCall", id: "call-1", name: "Bash", arguments: {} },
+      ]),
+    );
+    expect(buf.extractToolRationale("r1", "call-1").rationale).toBe(
+      "First thought.\nSecond thought.",
+    );
+  });
+
+  it("extracts non-redacted thinking content", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        {
+          type: "thinking",
+          thinking: "Let me think about this...",
+          redacted: false,
+        },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    const result = buf.extractToolRationale("r1", "call-1");
+    expect(result.thinking).toBe("Let me think about this...");
+    expect(result.thinkingRedacted).toBeUndefined();
+  });
+
+  it("sets thinkingRedacted=true and omits thinking text when block is redacted", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "thinking", thinking: "secret", redacted: true },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    const result = buf.extractToolRationale("r1", "call-1");
+    expect(result.thinking).toBeUndefined();
+    expect(result.thinkingRedacted).toBe(true);
+  });
+
+  it("only collects blocks BEFORE the matched toolCall, not after", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "text", text: "Before first tool." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+        { type: "text", text: "After first tool (for second tool)." },
+        { type: "toolCall", id: "call-2", name: "Bash", arguments: {} },
+      ]),
+    );
+    expect(buf.extractToolRationale("r1", "call-1").rationale).toBe(
+      "Before first tool.",
+    );
+    expect(buf.extractToolRationale("r1", "call-2").rationale).toBe(
+      "After first tool (for second tool).",
+    );
+  });
+
+  it("returns {} when toolCallId not found in content", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    expect(buf.extractToolRationale("r1", "call-999")).toEqual({});
+  });
+
+  it("returns {} when no pending message for the run", () => {
+    const buf = new IoBuffer({ enabled: true });
+    expect(buf.extractToolRationale("r1", "call-1")).toEqual({});
+  });
+
+  it("does not store pending message when disabled (captureContent=off)", () => {
+    const buf = new IoBuffer({ enabled: false });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "text", text: "Rationale." },
+        { type: "toolCall", id: "call-1", name: "Read", arguments: {} },
+      ]),
+    );
+    expect(buf.extractToolRationale("r1", "call-1")).toEqual({});
+  });
+
+  it("threads rationale through recordToolBefore into takeToolIo", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "text", text: "I need to list the files." },
+        { type: "toolCall", id: "c1", name: "Bash", arguments: {} },
+      ]),
+    );
+    const reasoning = buf.extractToolRationale("r1", "c1");
+    buf.recordToolBefore(
+      {
+        toolCallId: "c1",
+        toolName: "Bash",
+        args: { command: "ls" },
+        ...reasoning,
+      },
+      "r1",
+    );
+    const payload = buf.takeToolIo("r1", "c1");
+    expect(payload?.rationale).toBe("I need to list the files.");
+  });
+
+  it("clears pending assistant message on clearRun", () => {
+    const buf = new IoBuffer({ enabled: true });
+    buf.setPendingAssistantMessage(
+      "r1",
+      makeMsg([
+        { type: "text", text: "Rationale." },
+        { type: "toolCall", id: "c1", name: "Read", arguments: {} },
+      ]),
+    );
+    buf.clearRun("r1");
+    expect(buf.extractToolRationale("r1", "c1")).toEqual({});
   });
 });
 

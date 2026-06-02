@@ -60,6 +60,24 @@ export type ToolMiddlewarePayload = {
   threadId?: string;
   turnId?: string;
   durationMs?: number;
+  /**
+   * Text reasoning from the assistant message that requested this tool call.
+   * Extracted from TextContent blocks that precede the ToolCall block in the
+   * assistant response (i.e. the model's stated rationale). Only present when
+   * captureContent is enabled and the model emitted pre-tool text.
+   */
+  rationale?: string;
+  /**
+   * Extended thinking (scratchpad) content from the assistant message that
+   * requested this tool call. Only present when captureContent is enabled,
+   * the model uses extended thinking, and the thinking block was not redacted.
+   */
+  thinking?: string;
+  /**
+   * True when the assistant message contained a redacted thinking block before
+   * this tool call. The thinking text itself is not available in that case.
+   */
+  thinkingRedacted?: boolean;
 };
 
 /**
@@ -73,6 +91,12 @@ export type ToolBeforePayload = {
   args?: unknown;
   threadId?: string;
   turnId?: string;
+  /** Pre-tool reasoning text extracted from the preceding assistant message. */
+  rationale?: string;
+  /** Extended thinking content from the preceding assistant message. */
+  thinking?: string;
+  /** True if the preceding assistant message had a redacted thinking block. */
+  thinkingRedacted?: boolean;
 };
 
 /**
@@ -88,6 +112,26 @@ export type ToolAfterPayload = {
   durationMs?: number;
 };
 
+// Minimal parsed shape of an AssistantMessage content block.
+// We only need the fields used for reasoning extraction — keeping
+// this narrow avoids coupling to the full openclaw agent-core types.
+type AssistantTextBlock = { type: "text"; text: string };
+type AssistantThinkingBlock = {
+  type: "thinking";
+  thinking: string;
+  redacted?: boolean;
+};
+type AssistantToolCallBlock = { type: "toolCall"; id: string };
+type AssistantContentBlock =
+  | AssistantTextBlock
+  | AssistantThinkingBlock
+  | AssistantToolCallBlock
+  | { type: string }; // unknown block types — ignored
+
+type PendingAssistantMessage = {
+  content: AssistantContentBlock[];
+};
+
 type RunBuffer = {
   toolCalls: Map<string, ToolMiddlewarePayload>;
   // Run-level snapshots: first prompt seen and last assistant output
@@ -95,6 +139,10 @@ type RunBuffer = {
   // populate braintrust.input / braintrust.output on the run span.
   firstInput?: LlmInputPayload;
   lastOutput?: LlmOutputPayload;
+  // Most-recent assistant message for this run. Overwritten on each
+  // llm_output. Read by extractToolRationale when before_tool_call
+  // fires so tool spans carry the model's pre-call reasoning.
+  pendingAssistant?: PendingAssistantMessage;
 };
 
 export type IoBufferOptions = {
@@ -193,6 +241,106 @@ export class IoBuffer {
   }
 
   /**
+   * Store the raw `lastAssistant` object from an `llm_output` hook
+   * event so subsequent `before_tool_call` events for the same run can
+   * extract per-tool reasoning via `extractToolRationale`.
+   *
+   * Parses only the fields needed for reasoning extraction (type, text,
+   * thinking, id) — ignores everything else so we stay decoupled from
+   * the full openclaw AssistantMessage type. Gated by `enabled` because
+   * thinking/text content is conversation data.
+   */
+  setPendingAssistantMessage(runId: string, lastAssistant: unknown): void {
+    if (!this.enabled) return;
+    if (!runId) return;
+    const raw = lastAssistant as { content?: unknown[] } | null | undefined;
+    if (!raw?.content) return;
+    const content: AssistantContentBlock[] = [];
+    for (const block of raw.content) {
+      const b = block as Record<string, unknown>;
+      if (b["type"] === "text" && typeof b["text"] === "string") {
+        content.push({ type: "text", text: b["text"] });
+      } else if (
+        b["type"] === "thinking" &&
+        typeof b["thinking"] === "string"
+      ) {
+        content.push({
+          type: "thinking",
+          thinking: b["thinking"],
+          redacted: b["redacted"] === true,
+        });
+      } else if (b["type"] === "toolCall" && typeof b["id"] === "string") {
+        content.push({ type: "toolCall", id: b["id"] });
+      } else if (typeof b["type"] === "string") {
+        content.push({ type: b["type"] });
+      }
+    }
+    this.ensure(runId).pendingAssistant = { content };
+  }
+
+  /**
+   * Extract the reasoning that preceded a specific tool call from the
+   * most-recently-stored pending assistant message for the run.
+   *
+   * Scans the assistant content blocks for the `toolCall` block whose
+   * `id` matches `toolCallId`, then collects:
+   *   - text blocks before it → `rationale` (joined by newline)
+   *   - non-redacted thinking blocks before it → `thinking`
+   *   - whether any redacted thinking block was present → `thinkingRedacted`
+   *
+   * Returns empty object if there is no pending message, if the
+   * toolCallId is not found, or if no relevant blocks precede it.
+   */
+  extractToolRationale(
+    runId: string,
+    toolCallId: string,
+  ): {
+    rationale?: string;
+    thinking?: string;
+    thinkingRedacted?: boolean;
+  } {
+    const buf = this.byRun.get(runId);
+    const msg = buf?.pendingAssistant;
+    if (!msg) return {};
+    const idx = msg.content.findIndex(
+      (b) =>
+        b.type === "toolCall" &&
+        (b as AssistantToolCallBlock).id === toolCallId,
+    );
+    if (idx === -1) return {};
+    // Only collect blocks between the PREVIOUS toolCall (exclusive) and this
+    // one. Text/thinking before an earlier tool call belongs to that call's
+    // rationale, not this one. Find the last toolCall block before idx.
+    const prevToolCallIdx = (() => {
+      for (let i = idx - 1; i >= 0; i--) {
+        if (msg.content[i].type === "toolCall") return i;
+      }
+      return -1;
+    })();
+    const before = msg.content.slice(prevToolCallIdx + 1, idx);
+    const textParts = before
+      .filter((b): b is AssistantTextBlock => b.type === "text")
+      .map((b) => b.text)
+      .filter(Boolean);
+    const thinkingParts = before.filter(
+      (b): b is AssistantThinkingBlock =>
+        b.type === "thinking" && "thinking" in b && !b.redacted,
+    );
+    const hasRedacted = before.some(
+      (b): b is AssistantThinkingBlock =>
+        b.type === "thinking" && "thinking" in b && !!b.redacted,
+    );
+    return {
+      rationale: textParts.length > 0 ? textParts.join("\n") : undefined,
+      thinking:
+        thinkingParts.length > 0
+          ? thinkingParts.map((b) => b.thinking).join("\n")
+          : undefined,
+      thinkingRedacted: hasRedacted ? true : undefined,
+    };
+  }
+
+  /**
    * Non-consuming peek used by the run-level attribute mapper to derive
    * `braintrust.input` (first prompt) and `braintrust.output` (last
    * assistant text) when the run span closes.
@@ -213,12 +361,15 @@ export class IoBuffer {
    * `after_tool_call` payload has already landed for this toolCallId
    * (out-of-order delivery, rare but possible), the existing record is
    * augmented rather than overwritten.
+   *
+   * Identity fields (toolCallId, toolName, threadId, turnId) are always
+   * recorded — they are structural context, not conversation content.
+   * Args are only recorded when content capture is enabled.
    */
   recordToolBefore(
     payload: ToolBeforePayload,
     runId: string | undefined,
   ): void {
-    if (!this.enabled) return;
     if (!runId) return;
     const buf = this.ensure(runId);
     const existing = buf.toolCalls.get(payload.toolCallId);
@@ -229,9 +380,16 @@ export class IoBuffer {
       // optimistically stored a placeholder when an out-of-order after
       // landed first, replace it now.
       toolName: payload.toolName,
-      args: payload.args ?? existing?.args,
+      // args are content — only capture when enabled.
+      args: this.enabled ? (payload.args ?? existing?.args) : existing?.args,
       threadId: payload.threadId ?? existing?.threadId,
       turnId: payload.turnId ?? existing?.turnId,
+      // reasoning fields are content — already undefined when captureContent
+      // is off because extractToolRationale returns {} when setPendingAssistantMessage
+      // is gated. Pass through whatever the caller extracted.
+      rationale: payload.rationale ?? existing?.rationale,
+      thinking: payload.thinking ?? existing?.thinking,
+      thinkingRedacted: payload.thinkingRedacted ?? existing?.thinkingRedacted,
     });
   }
 
@@ -240,9 +398,11 @@ export class IoBuffer {
    * the matching `before_tool_call` payload by toolCallId. When no
    * before-payload has landed yet (unusual — tool fired without prior
    * args capture), a result-only entry is created.
+   *
+   * Identity fields (toolCallId, toolName, durationMs, isError) are always
+   * recorded. Result content is only recorded when content capture is enabled.
    */
   recordToolAfter(payload: ToolAfterPayload, runId: string | undefined): void {
-    if (!this.enabled) return;
     if (!runId) return;
     const buf = this.ensure(runId);
     const existing = buf.toolCalls.get(payload.toolCallId);
@@ -254,7 +414,10 @@ export class IoBuffer {
       // unset rather than substituting "unknown" — consumer code can
       // decide how to display a missing name.
       toolName: existing?.toolName ?? payload.toolName ?? "",
-      result: payload.result ?? existing?.result,
+      // result is content — only capture when enabled.
+      result: this.enabled
+        ? (payload.result ?? existing?.result)
+        : existing?.result,
       isError: payload.isError ?? existing?.isError,
       durationMs: payload.durationMs ?? existing?.durationMs,
     });
