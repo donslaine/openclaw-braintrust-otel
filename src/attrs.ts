@@ -224,6 +224,13 @@ export function buildModelUsageAttrs(
     "braintrust.metrics.cost": (e["costUsd"] as number) ?? 0,
   };
 
+  // gen_ai.request.model alias — same rationale as buildModelCallStartedAttrs.
+  // The usage event carries a model field in some openclaw versions; emit it
+  // when present so token counts are co-located with a model identifier on
+  // this span even without the parent model.call span in view.
+  const usageModel = e["model"] as string | undefined;
+  if (usageModel) attrs["gen_ai.request.model"] = usageModel;
+
   const conditional: AttrMap = {};
   if (lastCall.input !== undefined)
     conditional["braintrust.metadata.openclaw.last_call.prompt_tokens"] =
@@ -268,6 +275,10 @@ export function buildContextAssembledAttrs(
 ): AttrMap {
   return {
     ...common,
+    // "function" is the Braintrust span type for named logic blocks.
+    // Without this the span has no type label and is invisible to
+    // Braintrust's span-type filters.
+    "braintrust.span_attributes.type": "function",
     "braintrust.metadata.openclaw.trigger": (e["trigger"] as string) ?? "",
     "braintrust.metadata.openclaw.message_count":
       (e["messageCount"] as number) ?? 0,
@@ -294,7 +305,7 @@ export function buildModelCallStartedAttrs(
   e: DiagnosticEvent,
   common: AttrMap,
 ): AttrMap {
-  return {
+  const attrs: AttrMap = {
     ...common,
     "braintrust.span_attributes.type": "llm",
     "braintrust.metadata.openclaw.api": (e["api"] as string) ?? "",
@@ -304,6 +315,13 @@ export function buildModelCallStartedAttrs(
     "braintrust.metadata.openclaw.upstream_request_id_hash":
       (e["upstreamRequestIdHash"] as string) ?? "",
   };
+  // Emit gen_ai.request.model alongside braintrust.metadata.model so the
+  // span is compatible with any downstream OTEL processor that follows
+  // OTel gen_ai semantic conventions, not just Braintrust. Braintrust
+  // strips provider prefixes server-side on both paths.
+  const model = e["model"] as string | undefined;
+  if (model) attrs["gen_ai.request.model"] = model;
+  return attrs;
 }
 
 // Attributes set on completion/error of an in-flight model.call span.
@@ -347,12 +365,18 @@ export function buildModelCallCloseAttrs(e: DiagnosticEvent): AttrMap {
 export function buildToolExecutionStartedAttrs(
   common: AttrMap,
   toolName: string,
+  toolCallId?: string,
 ): AttrMap {
-  return {
+  const out: AttrMap = {
     ...common,
     "braintrust.span_attributes.type": "tool",
     "braintrust.metadata.openclaw.tool_name": toolName,
   };
+  // tool_call_id is structural identity, not content — surface it
+  // unconditionally so spans are correlatable even when captureContent
+  // is off.
+  if (toolCallId) out["braintrust.metadata.tool_call_id"] = toolCallId;
+  return out;
 }
 
 export function buildToolExecutionCloseAttrs(e: DiagnosticEvent): AttrMap {
@@ -368,12 +392,30 @@ export function buildToolExecutionCloseAttrs(e: DiagnosticEvent): AttrMap {
     out["braintrust.metadata.openclaw.blocked_reason"] =
       (e["reason"] as string) ?? (e["deniedReason"] as string) ?? "blocked";
   }
+  // Heuristic scores — give Braintrust something to filter/score on
+  // without requiring an LLM judge. Values are 0.0 or 1.0 (binary):
+  //   tool_success: 1 if completed without error, 0 on error or blocked.
+  //   tool_blocked: 1 if an operator policy blocked this call, 0 otherwise.
+  // These land as braintrust.scores.* so they appear in Braintrust's
+  // Scores column and can be used as dataset-promotion filters or as
+  // baselines for eval regression (e.g. "blocked rate rose from 2% to 8%").
+  const success = e.type === "tool.execution.completed" ? 1 : 0;
+  const blocked = e.type === "tool.execution.blocked" ? 1 : 0;
+  out["braintrust.scores.tool_success"] = success;
+  out["braintrust.scores.tool_blocked"] = blocked;
   return out;
 }
 
 // I/O attributes for a closed tool.execution span. Reads a payload
 // popped from the IoBuffer's tool-middleware registry. args/result
-// serialized as JSON; tool_call_id and is_error surface as metadata.
+// serialized as JSON; tool_call_id, thread_id, turn_id, and is_error
+// surface as metadata.
+//
+// Note: tool_call_id is also set unconditionally at span-start via
+// buildToolExecutionStartedAttrs. The set here is a no-op duplicate on
+// spans where the started-attrs already applied it, but is kept so the
+// attribute is always present on the closed span even in edge cases
+// where start and close use different keys.
 export function buildToolExecutionIoAttrs(
   payload: ToolMiddlewarePayload | undefined,
 ): AttrMap {
@@ -390,6 +432,34 @@ export function buildToolExecutionIoAttrs(
   }
   if (payload.isError !== undefined) {
     out["braintrust.metadata.is_error"] = payload.isError;
+  }
+  // threadId and turnId are structural context (which conversation thread
+  // and which turn triggered this tool call) — not content — so they are
+  // safe to emit even on deployments without captureContent. They land
+  // here rather than at span-start because they come from the
+  // before_tool_call hook payload, which is only available via IoBuffer.
+  // Note: IoBuffer.recordToolBefore gates on enabled, so these are only
+  // present in the payload when captureContent is on. A future improvement
+  // would record identity fields (toolCallId, threadId, turnId) unconditionally
+  // and gate only args/result on enabled.
+  if (payload.threadId) {
+    out["braintrust.metadata.openclaw.thread_id"] = payload.threadId;
+  }
+  if (payload.turnId) {
+    out["braintrust.metadata.openclaw.turn_id"] = payload.turnId;
+  }
+  // Reasoning extracted from the assistant message that preceded this tool
+  // call. rationale = text blocks (stated reasoning); thinking = extended
+  // thinking / scratchpad content (Anthropic extended thinking feature).
+  // Both are only present when captureContent is enabled.
+  if (payload.rationale) {
+    out["braintrust.metadata.openclaw.tool_rationale"] = payload.rationale;
+  }
+  if (payload.thinking) {
+    out["braintrust.metadata.openclaw.tool_thinking"] = payload.thinking;
+  }
+  if (payload.thinkingRedacted) {
+    out["braintrust.metadata.openclaw.tool_thinking_redacted"] = true;
   }
   return out;
 }

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.4.0 — 2026-06-02
+
+Eval-readiness pass: tool reasoning capture, heuristic scores, span-type fixes, and OTel gen_ai alignment.
+
+### Added
+
+- **Tool reasoning capture.** `openclaw.tool.execution` spans now carry the model's reasoning for each tool call when `captureContent.enabled = true`:
+  - `braintrust.metadata.openclaw.tool_rationale` — text blocks from the assistant message that preceded the tool call (the model's stated intent, e.g. "I need to check the config before making changes").
+  - `braintrust.metadata.openclaw.tool_thinking` — extended thinking / scratchpad content (Anthropic extended thinking feature) when present and not redacted.
+  - `braintrust.metadata.openclaw.tool_thinking_redacted` — `true` when thinking was present but redacted by the provider.
+
+  Reasoning is extracted from the `llm_output` hook's `lastAssistant` message by finding the `toolCall` content block matching each call's `toolCallId`, then collecting text/thinking blocks between the preceding toolCall and this one. The scoping is per-call (not per-turn), so parallel tool calls each get only the reasoning that directly precedes them.
+
+- **Heuristic `braintrust.scores` on tool spans.** Every `openclaw.tool.execution` span now emits binary scores visible in Braintrust's Scores column:
+  - `braintrust.scores.tool_success` — `1` on `tool.execution.completed`, `0` on error or blocked.
+  - `braintrust.scores.tool_blocked` — `1` on `tool.execution.blocked`, `0` otherwise.
+
+  These require no LLM judge and are always present (not gated by `captureContent`). Useful for tracking tool success rate and blocked rate over time, and as regression baselines (e.g. "blocked rate rose from 2% to 8% after a policy change").
+
+- **`gen_ai.request.model` alias on LLM spans.** `openclaw.model.call` and `openclaw.model.usage` spans now emit `gen_ai.request.model` alongside the existing `braintrust.metadata.model`, making spans compatible with downstream OTEL processors that follow OTel gen_ai semantic conventions.
+
+- **`tool_call_id` unconditional on tool spans.** `braintrust.metadata.tool_call_id` is now set at span-start time from the `tool.execution.started` event, so it is always present regardless of whether `captureContent` is enabled. Previously it only landed via the IoBuffer payload (captureContent-gated).
+
+- **`thread_id` and `turn_id` on tool spans.** `braintrust.metadata.openclaw.thread_id` and `turn_id` are now always recorded by the IoBuffer (identity fields, not content) and surface on `openclaw.tool.execution` spans when `captureContent` is on. Previously these fields were fully gated and never appeared.
+
+### Fixed
+
+- **`openclaw.context.assembled` span type.** This span was previously emitted with no `braintrust.span_attributes.type`, making it invisible to Braintrust's span-type filters. It now sets `type = "function"` (Braintrust's named-logic-block type).
+
+### Changed
+
+- **IoBuffer content-capture gate split.** `recordToolBefore` and `recordToolAfter` no longer early-return when `enabled = false`. Identity fields (`toolName`, `threadId`, `turnId`, `isError`, `durationMs`) are always recorded regardless of the `captureContent` setting. Only `args` and `result` remain gated. This makes `threadId`/`turnId` available on tool spans even on deployments where content capture is off.
+
+### Tests
+
+- 85 → 103. New coverage: `context.assembled` span type, `gen_ai.request.model` on model call and usage spans, tool score heuristics (completed / error / blocked), IoBuffer identity-vs-content gate split, full `setPendingAssistantMessage` + `extractToolRationale` suite (10 cases including multi-tool scoping, redacted thinking, disabled gate, clearRun cleanup).
+
 ## 0.3.2 — 2026-05-29
 
 Default flip for session-identifier hashing.
