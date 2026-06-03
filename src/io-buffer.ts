@@ -139,9 +139,8 @@ type RunBuffer = {
   // populate braintrust.input / braintrust.output on the run span.
   firstInput?: LlmInputPayload;
   lastOutput?: LlmOutputPayload;
-  // Most-recent assistant message for this run. Overwritten on each
-  // llm_output. Read by extractToolRationale when before_tool_call
-  // fires so tool spans carry the model's pre-call reasoning.
+  // Most-recent assistant message for this run. Kept for future use
+  // if OpenClaw ever fires llm_output per turn before tool dispatch.
   pendingAssistant?: PendingAssistantMessage;
 };
 
@@ -179,6 +178,19 @@ type OpenCallEntry = {
 
 export class IoBuffer {
   private byRun = new Map<string, RunBuffer>();
+  /**
+   * Most-recent tool-calling assistant message per session, keyed by
+   * sessionKey. Populated by setPendingAssistantMessageForSession from
+   * the before_message_write hook, which fires synchronously with the
+   * full AgentMessage (including ThinkingContent blocks) before the
+   * message is written to the transcript. Overwritten on each assistant
+   * message that contains tool calls. Read by extractToolRationaleForSession
+   * when before_tool_call fires.
+   */
+  private pendingAssistantBySession = new Map<
+    string,
+    PendingAssistantMessage
+  >();
   /**
    * Open or recently-closed model.call entries, keyed under BOTH
    * sessionKey and sessionId when both are present. Closed entries
@@ -338,6 +350,116 @@ export class IoBuffer {
           : undefined,
       thinkingRedacted: hasRedacted ? true : undefined,
     };
+  }
+
+  /**
+   * Store the assistant message received from the before_message_write
+   * hook, keyed by sessionKey. This hook fires synchronously with the
+   * full AgentMessage — including ThinkingContent blocks and ToolCall
+   * blocks — before the message is written to the session transcript.
+   * That makes it the correct interception point for capturing per-tool
+   * reasoning: the message arrives before before_tool_call fires.
+   *
+   * Only stores messages that contain at least one toolCall block, since
+   * reasoning is only meaningful in the context of a tool invocation.
+   * Gated by `enabled` because thinking/text content is conversation data.
+   */
+  setPendingAssistantMessageForSession(
+    sessionKey: string,
+    message: unknown,
+  ): void {
+    if (!this.enabled) return;
+    if (!sessionKey) return;
+    const raw = message as
+      | { role?: unknown; content?: unknown[] }
+      | null
+      | undefined;
+    if (raw?.role !== "assistant" || !raw?.content) return;
+    const content: AssistantContentBlock[] = [];
+    let hasToolCall = false;
+    for (const block of raw.content) {
+      const b = block as Record<string, unknown>;
+      if (b["type"] === "text" && typeof b["text"] === "string") {
+        content.push({ type: "text", text: b["text"] });
+      } else if (
+        b["type"] === "thinking" &&
+        typeof b["thinking"] === "string"
+      ) {
+        content.push({
+          type: "thinking",
+          thinking: b["thinking"],
+          redacted: b["redacted"] === true,
+        });
+      } else if (b["type"] === "toolCall" && typeof b["id"] === "string") {
+        content.push({ type: "toolCall", id: b["id"] });
+        hasToolCall = true;
+      } else if (typeof b["type"] === "string") {
+        content.push({ type: b["type"] });
+      }
+    }
+    // Only cache tool-calling turns — reasoning is per-tool.
+    if (!hasToolCall) return;
+    this.pendingAssistantBySession.set(sessionKey, { content });
+  }
+
+  /**
+   * Extract the reasoning that preceded a specific tool call from the
+   * most-recently-stored pending assistant message for the session.
+   * Mirrors extractToolRationale but keyed by sessionKey instead of
+   * runId, since before_message_write carries sessionKey rather than
+   * runId.
+   */
+  extractToolRationaleForSession(
+    sessionKey: string,
+    toolCallId: string,
+  ): {
+    rationale?: string;
+    thinking?: string;
+    thinkingRedacted?: boolean;
+  } {
+    const msg = this.pendingAssistantBySession.get(sessionKey);
+    if (!msg) return {};
+    const idx = msg.content.findIndex(
+      (b) =>
+        b.type === "toolCall" &&
+        (b as AssistantToolCallBlock).id === toolCallId,
+    );
+    if (idx === -1) return {};
+    const prevToolCallIdx = (() => {
+      for (let i = idx - 1; i >= 0; i--) {
+        if (msg.content[i].type === "toolCall") return i;
+      }
+      return -1;
+    })();
+    const before = msg.content.slice(prevToolCallIdx + 1, idx);
+    const textParts = before
+      .filter((b): b is AssistantTextBlock => b.type === "text")
+      .map((b) => b.text)
+      .filter(Boolean);
+    const thinkingParts = before.filter(
+      (b): b is AssistantThinkingBlock =>
+        b.type === "thinking" && "thinking" in b && !b.redacted,
+    );
+    const hasRedacted = before.some(
+      (b): b is AssistantThinkingBlock =>
+        b.type === "thinking" && "thinking" in b && !!b.redacted,
+    );
+    return {
+      rationale: textParts.length > 0 ? textParts.join("\n") : undefined,
+      thinking:
+        thinkingParts.length > 0
+          ? thinkingParts.map((b) => b.thinking).join("\n")
+          : undefined,
+      thinkingRedacted: hasRedacted ? true : undefined,
+    };
+  }
+
+  /**
+   * Remove the pending session assistant message. Called when a session
+   * ends to avoid memory leaks from long-lived sessions.
+   */
+  clearPendingAssistantForSession(sessionKey: string): void {
+    this.pendingAssistantBySession.delete(sessionKey);
   }
 
   /**
