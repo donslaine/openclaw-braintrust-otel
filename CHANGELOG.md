@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.1 — 2026-06-03
+
+Per-tool reasoning capture via `before_message_write` hook.
+
+### Fixed
+
+- **Per-tool reasoning now actually works.** The 0.4.0 implementation attempted to extract thinking blocks from the `llm_output` hook's `lastAssistant` field, but `llm_output` fires once per attempt after all turns complete — carrying only the final text-only response. Intermediate assistant messages (with thinking + tool call blocks) were never surfaced. The extraction always returned `{}`.
+
+  The fix uses the `before_message_write` hook instead. This hook fires synchronously with the full `AgentMessage` — including `ThinkingContent` blocks — before the message is written to the session transcript, which is before `before_tool_call` dispatches tools. Per-tool reasoning is now keyed by `sessionKey` + `toolCallId` and correctly scoped to the thinking that preceded each specific tool call.
+
+  Requires `captureContent: { enabled: true }` in plugin config. Verified against openclaw v2026.5.20 on the `pi` embedded runner (gateway/API-triggered runs). No `allowConversationAccess` required — `before_message_write` is not in `CONVERSATION_HOOK_NAMES`.
+
+### Changed
+
+- Removed dead `setPendingAssistantMessage` / `extractToolRationale` calls from the `llm_output` and `before_tool_call` handlers. The underlying IoBuffer methods are retained for future use if OpenClaw ever fires `llm_output` per turn.
+
 ## 0.4.0 — 2026-06-02
 
 Eval-readiness pass: tool reasoning capture, heuristic scores, span-type fixes, and OTel gen_ai alignment.
